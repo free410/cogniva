@@ -1,0 +1,42 @@
+# FastAPI & Web Server
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+
+# Database
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+pgvector==0.2.1
+
+# JWT Authentication
+python-jose[cryptography]==3.3.0
+
+# Pydantic & Settings
+pydantic==2.6.1
+pydantic-settings==2.1.0
+python-dotenv==1.0.1
+
+# LLM Providers
+openai>=1.12.0
+anthropic>=0.18.0
+dashscope>=1.14.1
+
+# HTTP Client
+httpx==0.26.0
+
+# File Processing
+aiofiles==23.2.1
+pypdf==4.0.1
+python-docx==1.1.0
+pandas>=2.0.0
+
+# Vector & ML
+# chromadb 已禁用 - 依赖 sentence-transformers (需要 1.5GB+ PyTorch)
+# 向量搜索使用 pgvector (PostgreSQL 扩展)
+
+# Caching
+redis==5.0.1
+
+# Utilities
+python-dateutil==2.8.2
