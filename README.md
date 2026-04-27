@@ -1,5 +1,7 @@
 # Cogniva · 智能知识问答平台
 
+![Cogniva](docs/images/architecture.svg)
+
 基于 RAG（检索增强生成）技术的智能知识问答平台，支持本地部署，保护隐私安全。
 
 ## 功能特性
@@ -10,6 +12,18 @@
 - **长期记忆** - 基于间隔重复算法的记忆系统，支持遗忘曲线复习
 - **多 LLM 支持** - 兼容 OpenAI、Claude、通义千问、Ollama 等多种大语言模型
 - **本地部署** - 数据完全存储在本地，保护隐私安全
+
+## 系统架构
+
+![系统架构](docs/images/architecture.svg)
+
+## RAG 工作流程
+
+![RAG 流程](docs/images/rag-flow.svg)
+
+## 项目结构
+
+![项目结构](docs/images/project-structure.svg)
 
 ## 技术栈
 
@@ -27,49 +41,6 @@
 - PostgreSQL + pgvector
 - LangChain
 - Sentence Transformers
-
-## 项目结构
-
-```
-knowledge-assistant/
-├── backend/                  # FastAPI 后端
-│   ├── api/                  # API 路由
-│   │   ├── chat.py          # 对话 API
-│   │   ├── documents.py     # 文档 API
-│   │   ├── memory.py         # 记忆 API
-│   │   └── search.py         # 搜索 API
-│   ├── core/                 # 核心配置
-│   │   ├── config.py         # 配置管理
-│   │   └── database.py       # 数据库连接
-│   ├── models/               # 数据模型
-│   │   └── models.py         # SQLAlchemy 模型
-│   ├── services/             # 业务逻辑
-│   │   ├── chat_service.py   # 对话服务
-│   │   ├── document_service.py # 文档服务
-│   │   ├── llm_gateway.py    # LLM 网关
-│   │   ├── memory_service.py # 记忆服务
-│   │   └── rag_service.py    # RAG 服务
-│   ├── main.py              # 应用入口
-│   └── requirements.txt     # Python 依赖
-│
-├── frontend/                 # Next.js 前端
-│   ├── app/                 # 页面
-│   │   ├── page.tsx         # 首页 (问答)
-│   │   ├── documents/       # 知识库页面
-│   │   ├── memory/          # 记忆页面
-│   │   └── settings/        # 设置页面
-│   ├── components/          # React 组件
-│   │   ├── chat/            # 聊天组件
-│   │   ├── documents/        # 文档组件
-│   │   ├── memory/           # 记忆组件
-│   │   └── layout/           # 布局组件
-│   ├── stores/              # Zustand 状态
-│   └── lib/                  # 工具函数
-│
-├── docker-compose.yml        # Docker 配置
-├── .env.example             # 环境变量示例
-└── .gitignore
-```
 
 ## 快速开始
 
@@ -126,6 +97,10 @@ npm run dev
 - 前端：http://localhost:3000
 - 后端 API：http://localhost:8000
 - API 文档：http://localhost:8000/docs
+
+## 部署架构
+
+![部署架构](docs/images/deployment.svg)
 
 ## API 文档
 
