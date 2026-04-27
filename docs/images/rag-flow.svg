@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 700">
+  <defs>
+    <linearGradient id="bgGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f8fafc"/>
+      <stop offset="100%" style="stop-color:#e2e8f0"/>
+    </linearGradient>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#3B82F6"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L9,3 z" fill="#8B5CF6"/>
+    </marker>
+    <filter id="shadow2" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#1e293b" flood-opacity="0.15"/>
+    </filter>
+  </defs>
+  
+  <rect width="1000" height="700" fill="url(#bgGrad2)"/>
+  
+  <!-- Title -->
+  <text x="500" y="40" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#1e293b">RAG 检索增强生成流程</text>
+  <text x="500" y="65" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#64748b">Retrieval Augmented Generation Workflow</text>
+  
+  <!-- ============= INgestion Pipeline (Left Side) ============= -->
+  <rect x="30" y="90" width="280" height="500" rx="12" fill="white" filter="url(#shadow2)"/>
+  <text x="170" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#059669">📥 文档摄入流程</text>
+  <text x="170" y="135" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#64748b">Ingestion Pipeline</text>
+  
+  <!-- Step 1: Upload -->
+  <rect x="50" y="155" width="240" height="55" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="2"/>
+  <text x="170" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#047857">📤 上传文档</text>
+  <text x="170" y="198" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#059669">PDF, Word, Excel, TXT</text>
+  
+  <!-- Arrow -->
+  <path d="M170 210 L170 235" stroke="#10B981" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  
+  <!-- Step 2: Parse -->
+  <rect x="50" y="240" width="240" height="55" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="2"/>
+  <text x="170" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#047857">📑 文档解析</text>
+  <text x="170" y="283" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#059669">文本提取 · 格式转换</text>
+  
+  <!-- Arrow -->
+  <path d="M170 295 L170 320" stroke="#10B981" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  
+  <!-- Step 3: Chunk -->
+  <rect x="50" y="325" width="240" height="55" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="2"/>
+  <text x="170" y="350" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#047857">✂️ 文本分块</text>
+  <text x="170" y="368" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#059669">chunk_size=500, overlap=50</text>
+  
+  <!-- Arrow -->
+  <path d="M170 380 L170 405" stroke="#10B981" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  
+  <!-- Step 4: Embed -->
+  <rect x="50" y="410" width="240" height="55" rx="8" fill="#ECFDF5" stroke="#10B981" stroke-width="2"/>
+  <text x="170" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#047857">🧮 向量化</text>
+  <text x="170" y="453" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#059669">Sentence Transformers</text>
+  
+  <!-- Arrow -->
+  <path d="M170 465 L170 490" stroke="#10B981" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  
+  <!-- Step 5: Store -->
+  <rect x="50" y="495" width="240" height="55" rx="8" fill="#10B981"/>
+  <text x="170" y="520" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="white">💾 存入向量库</text>
+  <text x="170" y="538" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#a7f3d0">pgvector</text>
+  
+  <!-- ============= Query Pipeline (Right Side) ============= -->
+  <rect x="340" y="90" width="300" height="500" rx="12" fill="white" filter="url(#shadow2)"/>
+  <text x="490" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#3B82F6">🔍 查询流程</text>
+  <text x="490" y="135" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#64748b">Query Pipeline</text>
+  
+  <!-- Step 1: Question -->
+  <rect x="360" y="155" width="260" height="55" rx="8" fill="#EFF6FF" stroke="#3B82F6" stroke-width="2"/>
+  <text x="490" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#1D4ED8">❓ 用户提问</text>
+  <text x="490" y="198" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#3B82F6">"什么是机器学习？"</text>
+  
+  <!-- Arrow -->
+  <path d="M490 210 L490 235" stroke="#3B82F6" stroke-width="2" fill="none" marker-end="url(#arrowBlue)"/>
+  
+  <!-- Step 2: Embed Query -->
+  <rect x="360" y="240" width="260" height="55" rx="8" fill="#EFF6FF" stroke="#3B82F6" stroke-width="2"/>
+  <text x="490" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#1D4ED8">🔮 向量化问题</text>
+  <text x="490" y="283" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#3B82F6">生成查询向量</text>
+  
+  <!-- Arrow -->
+  <path d="M490 295 L490 320" stroke="#3B82F6" stroke-width="2" fill="none" marker-end="url(#arrowBlue)"/>
+  
+  <!-- Step 3: Vector Search -->
+  <rect x="360" y="325" width="260" height="55" rx="8" fill="#EFF6FF" stroke="#3B82F6" stroke-width="2"/>
+  <text x="490" y="350" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#1D4ED8">🔍 向量检索</text>
+  <text x="490" y="368" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#3B82F6">top_k=5 · 余弦相似度</text>
+  
+  <!-- Arrow -->
+  <path d="M490 380 L490 405" stroke="#3B82F6" stroke-width="2" fill="none" marker-end="url(#arrowBlue)"/>
+  
+  <!-- Step 4: Get Chunks -->
+  <rect x="360" y="410" width="260" height="55" rx="8" fill="#EFF6FF" stroke="#3B82F6" stroke-width="2"/>
+  <text x="490" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#1D4ED8">📄 获取相关文档块</text>
+  <text x="490" y="453" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#3B82F6">相关段落 + 来源信息</text>
+  
+  <!-- ============= Generation Pipeline (Far Right) ============= -->
+  <rect x="670" y="90" width="300" height="300" rx="12" fill="white" filter="url(#shadow2)"/>
+  <text x="820" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#8B5CF6">✨ 生成流程</text>
+  <text x="820" y="135" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#64748b">Generation Pipeline</text>
+  
+  <!-- Step 1: Assemble -->
+  <rect x="690" y="155" width="260" height="55" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="2"/>
+  <text x="820" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#7C3AED">🔧 组装上下文</text>
+  <text x="820" y="198" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#8B5CF6">问题 + 检索结果 → Prompt</text>
+  
+  <!-- Arrow -->
+  <path d="M820 210 L820 235" stroke="#8B5CF6" stroke-width="2" fill="none" marker-end="url(#arrowPurple)"/>
+  
+  <!-- Step 2: LLM -->
+  <rect x="690" y="240" width="260" height="55" rx="8" fill="#F5F3FF" stroke="#8B5CF6" stroke-width="2"/>
+  <text x="820" y="265" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#7C3AED">🤖 LLM 处理</text>
+  <text x="820" y="283" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#8B5CF6">DeepSeek / Claude / Ollama</text>
+  
+  <!-- Arrow -->
+  <path d="M820 295 L820 320" stroke="#8B5CF6" stroke-width="2" fill="none" marker-end="url(#arrowPurple)"/>
+  
+  <!-- Step 3: Generate -->
+  <rect x="690" y="325" width="260" height="55" rx="8" fill="#8B5CF6"/>
+  <text x="820" y="350" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="white">💬 生成回答</text>
+  <text x="820" y="368" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#e9d5ff">+ 引用来源标注</text>
+  
+  <!-- ============= Citation Flow ============= -->
+  <rect x="670" y="410" width="300" height="180" rx="12" fill="white" filter="url(#shadow2)"/>
+  <text x="820" y="435" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#F59E0B">📚 引用来源</text>
+  
+  <!-- Citation Example -->
+  <rect x="690" y="450" width="260" height="120" rx="6" fill="#FFFBEB" stroke="#F59E0B" stroke-width="1"/>
+  <text x="705" y="475" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#B45309">来源 1: 机器学习入门指南.pdf</text>
+  <text x="705" y="495" font-family="Arial, sans-serif" font-size="9" fill="#D97706">chunk_id: 42 | 相似度: 0.92</text>
+  <text x="705" y="520" font-family="Arial, sans-serif" font-size="9" fill="#64748b">"机器学习是人工智能的一个分支..."</text>
+  <text x="705" y="540" font-family="Arial, sans-serif" font-size="9" fill="#64748b">"它通过算法让计算机从数据中学习..."</text>
+  <text x="705" y="560" font-family="Arial, sans-serif" font-size="9" fill="#64748b">"...无需明确编程即可自动改进"</text>
+  
+  <!-- Arrow from Retrieval to Context -->
+  <path d="M620 350 L690 350 L690 410" stroke="#3B82F6" stroke-width="2" stroke-dasharray="5,3" fill="none"/>
+  <text x="655" y="340" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#64748b">检索结果</text>
+  
+  <!-- Footer -->
+  <text x="500" y="680" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#94a3b8">Cogniva RAG 工作流程 · 支持 DeepSeek · Claude · 通义千问 · Ollama</text>
+</svg>
