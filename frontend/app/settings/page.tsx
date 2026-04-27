@@ -445,13 +445,13 @@ export default function SettingsPage() {
               分类
             </p>
             <nav className="space-y-0.5">
-              {SETTINGS_SECTIONS.map(section => {
-                const Icon = section.icon
+            {SETTINGS_SECTIONS.map(section => {
+              const Icon = section.icon
                 const isActive = activeSection === section.id
-                return (
-                  <button
-                    key={section.id}
-                    onClick={() => setActiveSection(section.id)}
+              return (
+                <button
+                  key={section.id}
+                  onClick={() => setActiveSection(section.id)}
                     className="w-full text-left px-3 py-2.5 rounded-lg transition-all duration-150 flex items-center gap-3"
                     style={{
                       background: isActive ? colors.accentBg : 'transparent',
@@ -461,10 +461,10 @@ export default function SettingsPage() {
                     <Icon className="w-4 h-4" />
                     <span className="text-sm">{section.label}</span>
                     {isActive && <ChevronRight className="w-4 h-4 ml-auto" />}
-                  </button>
-                )
-              })}
-            </nav>
+                </button>
+              )
+            })}
+          </nav>
 
             {/* 帮助提示 */}
             <div 
@@ -481,11 +481,11 @@ export default function SettingsPage() {
                 </p>
               </div>
             </div>
-          </div>
+        </div>
 
           {/* 右侧内容 */}
-          <div className="flex-1 p-6 overflow-y-auto">
-            {activeSection === 'llm' && (
+        <div className="flex-1 p-6 overflow-y-auto">
+          {activeSection === 'llm' && (
               <div className="max-w-xl space-y-6">
                 {/* 标题 */}
                 <div>
@@ -587,11 +587,11 @@ export default function SettingsPage() {
                       <p className="text-sm mt-2" style={{ color: colors.textMuted }}>加载中...</p>
                     </div>
                   )}
-                </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {activeSection === 'database' && (
+          {activeSection === 'database' && (
               <div className="max-w-xl space-y-6">
                 {/* 标题 */}
                 <div className="flex items-center justify-between">
@@ -703,12 +703,12 @@ export default function SettingsPage() {
                     className="px-1.5 py-0.5 rounded text-xs font-mono font-medium"
                     style={{ background: colors.isDark ? 'rgba(255,255,255,0.1)' : '#e2e8f0' }}
                   >.env</code> 文件中管理
-                  </p>
-                </div>
+                </p>
               </div>
-            )}
+            </div>
+          )}
 
-            {activeSection === 'api' && (
+          {activeSection === 'api' && (
               <div className="max-w-xl space-y-6">
                 {/* 标题 */}
                 <div>
@@ -730,7 +730,7 @@ export default function SettingsPage() {
                   }}
                 >
                   <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: colors.isDark ? '#fbbf24' : '#d97706' }} />
-                  <div>
+                <div>
                     <p className="text-sm font-medium" style={{ color: colors.isDark ? '#fbbf24' : '#92400e' }}>
                       安全提示
                     </p>
@@ -818,10 +818,10 @@ export default function SettingsPage() {
                     <p className="font-mono text-xs mt-2" style={{ color: colors.textMuted }}>
                       DASHSCOPE_API_KEY=your-api-key
                     </p>
-                  </div>
+                </div>
                 </SectionCard>
-              </div>
-            )}
+            </div>
+          )}
 
             {/* 保存按钮 - 仅模型配置页面显示 */}
             {activeSection === 'llm' && (
@@ -856,7 +856,7 @@ export default function SettingsPage() {
                       <span>保存设置</span>
                     </>
                   )}
-                </button>
+            </button>
                 {saved && (
                   <span className="text-sm" style={{ color: '#22c55e' }}>
                     配置已更新
