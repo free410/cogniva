@@ -293,7 +293,7 @@ class RAGService:
             query_lower = query.lower()
             doc_lower = document.lower()
             if not query_lower or not doc_lower:
-                return 0.0
+            return 0.0
             # 计算查询词在文档中出现的次数
             matches = 0
             for term in query_lower.split():
@@ -883,7 +883,7 @@ class RAGService:
                     ).all()
                     print(f"[RAG-HYBRID] 从指定文档获取 {len(chunks)} 个chunks: {document_ids}")
                 else:
-                    chunks = session.query(Chunk).join(Vector).all()
+                chunks = session.query(Chunk).join(Vector).all()
                     print(f"[RAG-HYBRID] 从所有文档获取 {len(chunks)} 个chunks")
 
                 # 构建chunk数据缓存
@@ -892,7 +892,7 @@ class RAGService:
                     if not chunk or not chunk.vector or not chunk.vector.embedding:
                         continue
 
-                    doc = session.query(Document).filter_by(id=chunk.document_id).first()
+                        doc = session.query(Document).filter_by(id=chunk.document_id).first()
 
                     # AI过滤
                     doc_meta = doc.metadata if doc and doc.metadata else {}
@@ -942,7 +942,7 @@ class RAGService:
                     
                     # BM25 分数
                     bm25_score = 0
-                    for variant in query_variants:
+                        for variant in query_variants:
                         bm25_score += self.bm25_score(variant, data['content'])
                     bm25_score = bm25_score / max(len(query_variants), 1)
                     
@@ -1054,7 +1054,7 @@ class RAGService:
                     
                     if is_relevant:
                         filtered_chunk_ids.append(chunk_id)
-                    else:
+                        else:
                         print(f"[RAG-FILTER] 过滤掉: bm25={bm25:.4f}, keyword={keyword:.4f}, term={term_match:.2f}, dense={dense_score:.3f}, hybrid={hybrid_score:.3f}")
                 
                 print(f"[RAG-FILTER] 过滤前: {len(fused_scores)}, 过滤后: {len(filtered_chunk_ids)}")
