@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Bot, User, Loader2, Copy, CheckCheck, BookmarkPlus, Sparkles, Settings2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Send, Bot, User, Loader2, Copy, CheckCheck, BookmarkPlus, Sparkles, Settings2, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { useChatStore } from '@/stores'
 import { MessageContent, SourcesPanel, EvidencePanel } from '@/components/chat'
 import { DocumentSelector } from './DocumentSelector'
@@ -15,7 +15,9 @@ export function Chat() {
     streamingContent,
     sendMessage,
     sendStreamMessage,
-    saveMessageAsMemory
+    saveMessageAsMemory,
+    clearCurrentConversation,
+    createConversation
   } = useChatStore()
   const { currentTheme } = useTheme()
   const [input, setInput] = useState('')
@@ -140,6 +142,27 @@ export function Chat() {
 
         {/* 右侧工具 */}
         <div className="flex items-center gap-3">
+          {/* 清空对话按钮 */}
+          {messages.length > 0 && (
+            <button
+              onClick={async () => {
+                if (confirm('确定要清空当前对话吗？')) {
+                  await createConversation()
+                }
+              }}
+              className="flex items-center gap-2 px-3 py-2 border rounded-lg transition-all text-sm h-10"
+              style={{
+                background: colors.cardBg,
+                borderColor: colors.border,
+                color: colors.textSecondary
+              }}
+              title="新建对话"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>清空</span>
+            </button>
+          )}
+
           <select
             value={provider}
             onChange={(e) => setProvider(e.target.value)}

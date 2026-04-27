@@ -1,7 +1,5 @@
 # Cogniva · 智能知识问答平台
 
-![Cogniva](docs/images/architecture.svg)
-
 基于 RAG（检索增强生成）技术的智能知识问答平台，支持本地部署，保护隐私安全。
 
 ## 功能特性
@@ -20,6 +18,28 @@
 ## RAG 工作流程
 
 ![RAG 流程](docs/images/rag-flow.svg)
+
+## 项目截图
+
+### 登录页面
+
+![登录页面](docs/screenshots/login.png)
+
+### 智能问答
+
+![智能问答](docs/screenshots/chat.png)
+
+### 知识库管理
+
+![知识库管理](docs/screenshots/documents.png)
+
+### 记忆系统
+
+![记忆系统](docs/screenshots/memory.png)
+
+### 设置页面
+
+![设置页面](docs/screenshots/settings.png)
 
 ## 项目结构
 
