@@ -5,11 +5,17 @@ import httpx
 import hashlib
 import re
 import math
-import itertools
 from sqlalchemy.orm import Session
 from models import Chunk, Vector, Citation, Message, Document
 from core.config import settings
+from core.cache import cache_get_int, cache_get_json, cache_set_json, make_cache_key
+import asyncio
 import json
+import os
+import threading
+import time
+import weakref
+from pathlib import Path
 
 
 class DashScopeEmbeddingService:
@@ -18,9 +24,28 @@ class DashScopeEmbeddingService:
     def __init__(self):
         self.api_key = settings.DASHSCOPE_API_KEY
         self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        # text-embedding-v3 返回 1536 维向量
-        self.dimension = 1536
+        # text-embedding-v3 默认返回 1024 维向量
+        self.dimension = 1024
         self.cache = {}
+        # DashScope text-embedding-v3 单次最多 10 条输入，超出会返回 400
+        self._embed_batch_size = 10
+        # 复用 HTTP 客户端：避免每次请求重建 SSL 上下文（Windows 上约 1.3s）
+        self._async_clients = weakref.WeakKeyDictionary()
+        self._sync_client: Optional[httpx.Client] = None
+
+    def _get_async_client(self) -> httpx.AsyncClient:
+        """按事件循环复用 AsyncClient（连接池复用 + 免去重复 TLS 握手）"""
+        loop = asyncio.get_running_loop()
+        client = self._async_clients.get(loop)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=60.0)
+            self._async_clients[loop] = client
+        return client
+
+    def _get_sync_client(self) -> httpx.Client:
+        if self._sync_client is None or self._sync_client.is_closed:
+            self._sync_client = httpx.Client(timeout=60.0)
+        return self._sync_client
 
     async def embed_async(self, texts: List[str]) -> List[List[float]]:
         """异步生成嵌入向量"""
@@ -39,7 +64,11 @@ class DashScopeEmbeddingService:
 
         if uncached_texts:
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
+                client = self._get_async_client()
+                embeddings = []
+                # 按批请求，避免超过 DashScope 单次输入数量上限
+                for start in range(0, len(uncached_texts), self._embed_batch_size):
+                    batch = uncached_texts[start:start + self._embed_batch_size]
                     response = await client.post(
                         f"{self.base_url}/embeddings",
                         headers={
@@ -48,26 +77,29 @@ class DashScopeEmbeddingService:
                         },
                         json={
                             "model": "text-embedding-v3",  # 升级为 v3 版本，性能更好
-                            "input": uncached_texts,
+                            "input": batch,
                             "encoding_format": "float"  # 明确指定返回格式
                         }
                     )
                     response.raise_for_status()
                     data = response.json()
-                    embeddings = [item["embedding"] for item in data["data"]]
+                    batch_embeddings = [item["embedding"] for item in data["data"]]
+                    if len(batch_embeddings) != len(batch):
+                        raise ValueError("embedding 返回数量与输入数量不一致")
+                    embeddings.extend(batch_embeddings)
 
-                    for text, embedding in zip(uncached_texts, embeddings):
-                        self.cache[text] = embedding
+                for text, embedding in zip(uncached_texts, embeddings):
+                    self.cache[text] = embedding
 
-                    result = []
-                    j = 0
-                    for i in range(len(texts)):
-                        if cached[i] is not None:
-                            result.append(cached[i])
-                        else:
-                            result.append(embeddings[j])
-                            j += 1
-                    return result
+                result = []
+                j = 0
+                for i in range(len(texts)):
+                    if cached[i] is not None:
+                        result.append(cached[i])
+                    else:
+                        result.append(embeddings[j])
+                        j += 1
+                return result
 
             except Exception as e:
                 print(f"DashScope embedding failed: {e}, using fallback")
@@ -106,7 +138,11 @@ class DashScopeEmbeddingService:
 
         if uncached_texts:
             try:
-                with httpx.Client(timeout=60.0) as client:
+                client = self._get_sync_client()
+                embeddings = []
+                # 按批请求，避免超过 DashScope 单次输入数量上限
+                for start in range(0, len(uncached_texts), self._embed_batch_size):
+                    batch = uncached_texts[start:start + self._embed_batch_size]
                     response = client.post(
                         f"{self.base_url}/embeddings",
                         headers={
@@ -115,26 +151,29 @@ class DashScopeEmbeddingService:
                         },
                         json={
                             "model": "text-embedding-v3",  # 升级为 v3 版本
-                            "input": uncached_texts,
+                            "input": batch,
                             "encoding_format": "float"
                         }
                     )
                     response.raise_for_status()
                     data = response.json()
-                    embeddings = [item["embedding"] for item in data["data"]]
+                    batch_embeddings = [item["embedding"] for item in data["data"]]
+                    if len(batch_embeddings) != len(batch):
+                        raise ValueError("embedding 返回数量与输入数量不一致")
+                    embeddings.extend(batch_embeddings)
 
-                    for text, embedding in zip(uncached_texts, embeddings):
-                        self.cache[text] = embedding
+                for text, embedding in zip(uncached_texts, embeddings):
+                    self.cache[text] = embedding
 
-                    result = []
-                    j = 0
-                    for i in range(len(texts)):
-                        if cached[i] is not None:
-                            result.append(cached[i])
-                        else:
-                            result.append(embeddings[j])
-                            j += 1
-                    return result
+                result = []
+                j = 0
+                for i in range(len(texts)):
+                    if cached[i] is not None:
+                        result.append(cached[i])
+                    else:
+                        result.append(embeddings[j])
+                        j += 1
+                return result
 
             except Exception as e:
                 print(f"DashScope embedding (sync) failed: {e}, using fallback")
@@ -149,26 +188,133 @@ embedding_service = DashScopeEmbeddingService()
 class RAGService:
     """RAG 检索增强生成服务"""
 
+    # 进程级共享重排模型，避免每次请求重复加载
+    _reranker_model = None
+    _reranker_failed = False
+    _reranker_lock = threading.Lock()
+
+    # 用户语料内存缓存：(user_id, corpus_version) -> (缓存时间, chunk_data)
+    # corpus_version 由 Redis 在文档增删时自增，从而自动失效
+    _corpus_cache: Dict[Tuple[str, int], Tuple[float, Dict[str, Dict[str, Any]]]] = {}
+    _corpus_cache_lock = threading.Lock()
+    _corpus_cache_ttl = 300
+    _corpus_cache_max_users = 20
+
     def __init__(self, db: Session):
         self.db = db
         self.embedding_service = embedding_service
-        # 初始化重排序模型（延迟加载以加快启动速度）
-        self._reranker = None
-        self._reranker_model_name = "BAAI/bge-reranker-v2-m3"  # 多语言重排模型，支持中文
+        # 优先使用本地已下载模型，避免运行时联网
+        local_reranker = Path(__file__).resolve().parents[2] / "models" / "bge-reranker-v2-m3"
+        self._reranker_model_name = str(local_reranker) if local_reranker.exists() else "BAAI/bge-reranker-v2-m3"
 
     @property
     def reranker(self):
-        """延迟加载重排序模型"""
-        if self._reranker is None:
-            try:
-                from sentence_transformers import CrossEncoder
-                print(f"Loading reranker model: {self._reranker_model_name}...")
-                self._reranker = CrossEncoder(self._reranker_model_name, device='cpu')
-                print("Reranker model loaded successfully")
-            except Exception as e:
-                print(f"Failed to load reranker model: {e}")
-                self._reranker = False  # 标记为加载失败，不再重试
-        return self._reranker if self._reranker else None
+        """延迟加载重排序模型（进程内只加载一次）"""
+        if RAGService._reranker_model is None and not RAGService._reranker_failed:
+            with RAGService._reranker_lock:
+                if RAGService._reranker_model is None and not RAGService._reranker_failed:
+                    try:
+                        import torch
+                        from sentence_transformers import CrossEncoder
+                        torch.set_num_threads(max(1, os.cpu_count() or 4))
+                        print(f"Loading reranker model: {self._reranker_model_name}...")
+                        RAGService._reranker_model = CrossEncoder(
+                            self._reranker_model_name,
+                            device='cpu',
+                            max_length=256
+                        )
+                        print("Reranker model loaded successfully")
+                    except Exception as e:
+                        print(f"Failed to load reranker model: {e}")
+                        RAGService._reranker_failed = True
+        return RAGService._reranker_model
+
+    def _load_corpus(
+        self,
+        user_id: Optional[str],
+        document_ids: Optional[List[str]],
+        corpus_version: int
+    ) -> Dict[str, Dict[str, Any]]:
+        """加载可检索语料，按（用户, 语料版本）进程内缓存，避免每次检索全表扫描"""
+        cache_key = (str(user_id), int(corpus_version)) if user_id else None
+        now = time.time()
+        corpus = None
+        if cache_key:
+            with RAGService._corpus_cache_lock:
+                entry = RAGService._corpus_cache.get(cache_key)
+                if entry and now - entry[0] < RAGService._corpus_cache_ttl:
+                    corpus = entry[1]
+
+        if corpus is None:
+            corpus = self._fetch_corpus(user_id, document_ids)
+            if cache_key:
+                with RAGService._corpus_cache_lock:
+                    RAGService._corpus_cache[cache_key] = (now, corpus)
+                    if len(RAGService._corpus_cache) > RAGService._corpus_cache_max_users:
+                        oldest = min(
+                            RAGService._corpus_cache.items(),
+                            key=lambda kv: kv[1][0]
+                        )[0]
+                        RAGService._corpus_cache.pop(oldest, None)
+
+        if document_ids:
+            allowed = {str(d) for d in document_ids}
+            return {
+                cid: item for cid, item in corpus.items()
+                if item['document_id'] in allowed
+            }
+        return corpus
+
+    def _fetch_corpus(
+        self,
+        user_id: Optional[str],
+        document_ids: Optional[List[str]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """从数据库构建语料字典（只保留检索需要的字段，不持有 ORM 对象）"""
+        from core.database import SessionLocal
+        from sqlalchemy.orm import joinedload
+
+        session = SessionLocal()
+        try:
+            stmt = session.query(Chunk).options(
+                joinedload(Chunk.document)
+            ).join(Vector)
+            if user_id:
+                stmt = stmt.join(
+                    Document, Chunk.document_id == Document.id
+                ).filter(Document.user_id == user_id)
+            elif document_ids:
+                stmt = stmt.filter(Chunk.document_id.in_(document_ids))
+
+            chunk_data: Dict[str, Dict[str, Any]] = {}
+            for chunk in stmt.all():
+                if not chunk:
+                    continue
+
+                doc = chunk.document
+                doc_meta = doc.metadata_ if doc and doc.metadata_ else {}
+                if isinstance(doc_meta, dict):
+                    if doc_meta.get('is_ai_generated', False) or doc_meta.get('ai_generated', False):
+                        continue
+                fname = (doc.filename or '').lower() if doc else ''
+                if any(x in fname for x in ['ai生成', 'ai_generated', 'auto-generated']):
+                    continue
+                content = chunk.content or ''
+                if content[:200].lower():
+                    if any(x in content[:200].lower() for x in ['ai生成', 'ai generated', '由 ai']):
+                        continue
+
+                chunk_data[str(chunk.id)] = {
+                    'content': content,
+                    'content_lower': content.lower(),
+                    'document_id': str(doc.id) if doc else '',
+                    'document_title': (doc.filename or 'Unknown') if doc else 'Unknown',
+                    'chunk_index': chunk.chunk_index,
+                    'metadata': doc_meta
+                }
+            return chunk_data
+        finally:
+            session.close()
 
     def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """计算余弦相似度"""
@@ -236,64 +382,30 @@ class RAGService:
             words.extend(english_words)
             return words
 
-        # 【关键修复】确保短国家名不被切分，在jieba分词前先标记
-        use_jieba = False
         try:
             import jieba
             use_jieba = True
         except ImportError:
-            pass
-        
+            use_jieba = False
+
         if use_jieba:
-            # 重要术语列表（这些词不会被切分）
-            important_terms = [
-                # 国家名
-                '印度', '巴西', '中国', '美国', '日本', '韩国', '法国', '德国', 
-                '英国', '意大利', '泰国', '越南', '墨西哥', '俄罗斯', '澳大利亚', 
-                '加拿大', '新加坡', '马来西亚', '印尼', '菲律宾', '土耳其', '埃及',
-                '南非', '尼日利亚', '肯尼亚', '摩洛哥', '秘鲁', '阿根廷', '智利',
-                '哥伦比亚', '新西兰', '荷兰', '比利时', '瑞士', '奥地利', '波兰',
-                '瑞典', '挪威', '丹麦', '芬兰', '希腊', '葡萄牙', '匈牙利', '捷克',
-                # 菜系名
-                '闽菜', '川菜', '粤菜', '湘菜', '鲁菜', '苏菜', '浙菜', '徽菜', '闽菜', '京菜',
-                # 特色美食
-                '肉夹馍', '凉皮', '羊肉泡馍', 'biangbiang面', '臊子面', '油泼面',
-                # 其他重要术语
-                '泡馍', '面食', '凉菜', '热菜', '小吃', '主食', '菜肴',
-                # 闽菜相关
-                '闽菜', '福州菜', '闽南菜', '佛跳墙', '荔枝肉', '闽西菜',
-            ]
-            
-            # 标记重要术语，防止被切分
-            marked_query = query
-            marked_doc = document
-            for term in important_terms:
-                if term in query:
-                    marked_query = marked_query.replace(term, f"_{term}_")
-                if term in document:
-                    marked_doc = marked_doc.replace(term, f"_{term}_")
-            
             def tokenize(text: str) -> List[str]:
                 words = list(jieba.cut(text.lower()))
                 stopwords = {'的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '但', '还', '么', '什么', '可以', '这个', '那个', '主要', '具有', '以及', '还有'}
-                words = [w.strip('_') for w in words if len(w.strip('_')) >= 2 and w.strip('_') not in stopwords]
-                return words
+                return [w for w in words if len(w) >= 2 and w not in stopwords]
         else:
-            marked_query = query
-            marked_doc = document
             def tokenize(text: str) -> List[str]:
                 return simple_tokenize(text)
-        
-        # 使用标记后的文本进行分词
-        query_terms = tokenize(marked_query)
-        doc_terms = tokenize(marked_doc)
+
+        query_terms = tokenize(query)
+        doc_terms = tokenize(document)
 
         if not query_terms or not doc_terms:
             # 回退：使用简单的字符级匹配
             query_lower = query.lower()
             doc_lower = document.lower()
             if not query_lower or not doc_lower:
-            return 0.0
+                return 0.0
             # 计算查询词在文档中出现的次数
             matches = 0
             for term in query_lower.split():
@@ -327,8 +439,8 @@ class RAGService:
                 score += term_score
                 matched_terms.append(f"{term}({term_score:.2f})")
         
-        # 【调试】如果有匹配，显示
-        if matched_terms:
+        # 【调试】如果有匹配，显示（生产环境关闭，避免逐 chunk 格式化日志）
+        if matched_terms and settings.DEBUG:
             print(f"[BM25-DBG] query='{query[:30]}...', matched={matched_terms}, score={score:.2f}")
 
         return score
@@ -376,25 +488,6 @@ class RAGService:
         """提取核心术语用于精确匹配 - 保留重要复合词"""
         core_terms = []
 
-        # 重要术语列表（保持完整，不被切分）
-        important_terms = [
-            # 菜系名
-            '闽菜', '川菜', '粤菜', '湘菜', '鲁菜', '苏菜', '浙菜', '徽菜', '京菜',
-            # 特色美食
-            '肉夹馍', '凉皮', '羊肉泡馍', 'biangbiang面', '臊子面', '油泼面',
-            '泡馍', '面食', '凉菜', '热菜', '小吃', '主食', '菜肴',
-            # 国家名
-            '印度', '巴西', '中国', '美国', '日本', '韩国', '法国', '德国',
-            '英国', '意大利', '泰国', '越南', '墨西哥', '俄罗斯', '澳大利亚',
-            '加拿大', '新加坡', '马来西亚', '印尼', '菲律宾', '土耳其', '埃及',
-            '南非', '尼日利亚', '肯尼亚', '摩洛哥', '秘鲁', '阿根廷', '智利',
-        ]
-
-        # 先提取重要术语
-        for term in important_terms:
-            if term.lower() in query.lower():
-                core_terms.append(term)
-
         # 使用jieba进行分词
         try:
             import jieba
@@ -421,403 +514,23 @@ class RAGService:
         return core_terms
 
     def expand_query_with_synonyms(self, query: str) -> List[str]:
-        """查询扩展：使用同义词和词干变体"""
+        """查询扩展：由分词结果生成变体，不依赖任何领域词表"""
         expanded = [query]
+        question_words = {'什么', '哪些', '哪个', '怎么', '如何', '怎样', '为什么', '请问', '一下'}
+        try:
+            tokens = [
+                t for t in self._tokenize(query)
+                if len(t) >= 2 and not t.isdigit() and t not in question_words
+            ]
+        except Exception:
+            tokens = []
 
-        # 农业术语同义词库（扩展版）
-        synonym_dict = {
-            # 病害相关
-            '病': ['病害', '疾病', '症状', '发病', '病变', '病理'],
-            '害': ['害虫', '虫害', '虫害', '防治'],
-            '防治': ['防治', '治疗', '控制', '治理', '方法', '措施', '技术'],
-            '症状': ['症状', '特征', '表现', '迹象', '表征'],
-            # 防治方法
-            '杀虫': ['杀虫', '灭虫', '杀灭', '杀除', '驱虫'],
-            '预防': ['预防', '防治', '避免', '防止', '规避'],
-            '治疗': ['治疗', '治愈', '用药', '施药', '疗法'],
-            # 作物相关
-            '水稻': ['水稻', '稻谷', '稻田', '水稻种植', '稻子', '大米'],
-            '小麦': ['小麦', '麦子', '麦田', '小麦种植', '麦穗'],
-            '玉米': ['玉米', '苞米', '玉蜀黍', '玉米种植', '苞谷', '棒子'],
-            '蔬菜': ['蔬菜', '菜类', '蔬菜作物', '蔬菜种植', '青菜'],
-            '大豆': ['大豆', '黄豆', '毛豆', '豆类', '大豆种植'],
-            '棉花': ['棉花', '棉株', '棉田', '棉铃'],
-            '果树': ['果树', '果木', '果树林', '水果树', '果树栽培'],
-            '柑橘': ['柑橘', '橘子', '橙子', '柑桔', '柚子'],
-            # 肥料相关
-            '肥': ['肥料', '施肥', '营养', '养分', '有机肥', '无机肥', '氮磷钾', '复合肥'],
-            '施肥': ['施肥', '追肥', '底肥', '基肥', '撒肥', '施肥方法'],
-            '氮肥': ['氮肥', '尿素', '氨态氮', '氮素', '氮'],
-            '磷肥': ['磷肥', '磷素', '磷'],
-            '钾肥': ['钾肥', '钾素', '钾'],
-            '有机肥': ['有机肥', '农家肥', '粪肥', '堆肥', '厩肥'],
-            # 土壤相关
-            '土': ['土壤', '土质', '地力', '土壤条件', '泥土', '土地'],
-            '酸碱': ['pH值', '酸碱度', '酸碱性', '土壤pH', 'PH值'],
-            '土壤': ['土壤', '土地', '田地', '耕地', '土壤改良'],
-            '肥力': ['肥力', '地力', '土壤肥力', '养分含量'],
-            # 种植相关
-            '种': ['种子', '种苗', '品种', '作物品种', '种植材料'],
-            '栽': ['栽种', '种植', '栽培', '播种', '育苗', '移栽'],
-            '播种': ['播种', '撒种', '种植', '条播', '点播', '撒播'],
-            '育苗': ['育苗', '培育', '培养', '培育幼苗'],
-            '收获': ['收获', '收割', '采收', '采摘', '丰收'],
-            # 气候相关
-            '温': ['温度', '气温', '温室', '保温', '温度管理'],
-            '湿': ['湿度', '水分', '水分管理', '灌溉', '保湿'],
-            '光': ['光照', '光合作用', '光照强度', '日照', '阳光'],
-            '气候': ['气候', '天气', '气象', '气候条件'],
-            '干旱': ['干旱', '旱情', '缺水', '干旱灾害'],
-            '涝': ['涝害', '洪涝', '水灾', '积水', '排水不良'],
-            '霜': ['霜冻', '霜害', '低温冻害', '防霜'],
-            # 病虫害相关
-            '虫': ['害虫', '虫害', '虫害防治', '杀虫剂', '农药', '虫子'],
-            '菌': ['病菌', '真菌', '细菌', '微生物', '杀菌剂', '菌类'],
-            '病毒': ['病毒', '病毒病', '病原', '病害'],
-            '蚜虫': ['蚜虫', '腻虫', '蚜害'],
-            '螟虫': ['螟虫', '螟蛾', '钻心虫', '二化螟', '三化螟'],
-            '稻飞虱': ['稻飞虱', '飞虱', '褐飞虱', '白背飞虱'],
-            '红蜘蛛': ['红蜘蛛', '螨虫', '叶��', '蛛螨'],
-            '白粉病': ['白粉病', '白粉菌', '粉状霉'],
-            '纹枯病': ['纹枯病', '纹枯菌', '鞘腐病'],
-            '锈病': ['锈病', '锈菌', '叶锈', '杆锈'],
-            '腐烂': ['腐烂', '腐病', '软腐', '茎腐', '根腐'],
-            # 农业措施相关
-            '管理': ['管理', '栽培管理', '田间管理', '养护', '农事管理'],
-            '处理': ['处理', '处置', '方法', '技术', '措施'],
-            '灌溉': ['灌溉', '浇水', '供水', '灌溉系统', '滴灌', '喷灌'],
-            '排水': ['排水', '排涝', '泄水', '排水系统'],
-            '除草': ['除草', '锄草', '杂草防除', '草害防治'],
-            '修剪': ['修剪', '整枝', '剪枝', '修枝', '整形'],
-            '套袋': ['套袋', '果实套袋', '保护袋'],
-            # 产量相关
-            '产量': ['产量', '收成', '产出', '单位面积产量', '亩产', '产量提高'],
-            '品质': ['品质', '质量', '品级', '等级', '优质'],
-            '成熟': ['成熟', '成熟期', '老熟', '完熟', '成熟度'],
-            # 农药相关
-            '农药': ['农药', '药剂', '杀虫剂', '杀菌剂', '除草剂', '农药使用'],
-            '剂量': ['剂量', '用药量', '浓度', '配比', '稀释倍数'],
-            '残留': ['残留', '农药残留', '残留量', '安全间隔期'],
-            # 农业技术相关
-            '技术': ['技术', '方法', '工艺', '规程', '操作规程'],
-            '设施': ['设施', '设备', '装置', '农业设施', '大棚'],
-            '薄膜': ['薄膜', '地膜', '农膜', '塑料薄膜', '覆盖'],
-            '温室': ['温室', '大棚', '日光温室', '智能温室', '塑料大棚'],
-        }
+        if tokens and len(tokens) <= 10:
+            variant = ' '.join(tokens)
+            if variant != query:
+                expanded.append(variant)
 
-        # 提取查询中的词
-        words = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', query)
-        expanded_query = list(words)
-
-        # 查找同义词
-        for word in words:
-            if word in synonym_dict:
-                for syn in synonym_dict[word]:
-                    if syn not in expanded_query:
-                        expanded_query.append(syn)
-
-        # 生成新的查询组合
-        if len(expanded_query) > len(words):
-            # 不同组合方式
-            # 1. 原始词 + 一个同义词
-            for i, word in enumerate(words):
-                if word in synonym_dict:
-                    for syn in synonym_dict[word]:
-                        variant = list(words)
-                        variant[i] = syn
-                        expanded.append(''.join(variant))
-
-            # 2. 全部同义词替换
-            if all(w in synonym_dict for w in words):
-                for combo in itertools.product(*[synonym_dict.get(w, [w]) for w in words]):
-                    variant = ''.join(combo)
-                    if variant != query:
-                        expanded.append(variant)
-
-        # 通用同义词扩展（基于单字符的同义替换）
-        general_synonyms = {
-            '怎': ['如何', '怎样', '怎么'],
-            '何': ['如何', '怎样', '怎么'],
-            '因': ['原因', '病因', '因素'],
-            '为': ['因为', '为何', '原因'],
-            '时': ['时间', '时期', '时节', '什么时候'],
-            '要': ['主要', '重要', '要点', '要素'],
-            '做': ['做法', '如何做', '怎么做的'],
-            '用': ['使用', '用途', '用处', '应用'],
-            '能': ['能力', '可以', '能够'],
-            '好': ['良好', '优良', '优秀'],
-            '坏': ['不良', '劣质', '问题'],
-        }
-
-        return list(set(expanded))  # 去重
-
-    async def _intent_relevance_check(self, query: str, retrieved_chunks: List[Dict], threshold: float = 0.20) -> Tuple[List[Dict], float]:
-        """
-        意图相关性检查 - 智能动态主题识别与相关性验证
-        完全自动化，无需硬编码主题列表，自动适应任何领域
-        """
-        if not retrieved_chunks:
-            return [], 0.0
-
-        query_lower = query.lower().strip()
-
-        # ===== 阶段1：提取查询核心实体和概念 =====
-        # 提取命名实体（人名、地名、机构名、专有名词等）
-        query_entities = self._extract_entities(query)
-
-        # 提取核心关键词（去除停用词后长度>=2的词）
-        stop_words = {'的', '了', '是', '在', '和', '与', '及', '或', '我', '你', '他', '她', '它',
-                      '请问', '请', '帮我', '什么', '哪些', '哪个', '怎么', '如何', '怎样', '怎么办',
-                      '是什么', '为什么', '为何', '有没有', '吗', '呢', '啊', '吧', '呢'}
-        query_keywords = [w for w in query_lower.split()
-                         if len(w) >= 2 and w not in stop_words and not w.isdigit()]
-
-        # 提取专业术语（连续的2-4字词，可能包含专业词汇）
-        import re
-        # 匹配可能的中文专业术语（2-4个连续汉字，非停用词）
-        pattern = r'[\u4e00-\u9fa5]{2,4}'
-        potential_terms = re.findall(pattern, query)
-        professional_terms = [t for t in potential_terms
-                            if t not in stop_words and len(t) >= 2]
-
-        # 合并所有查询特征
-        query_features = {
-            'entities': set(query_entities),
-            'keywords': set(query_keywords),
-            'professional_terms': set(professional_terms),
-            'full_query': query_lower
-        }
-        
-        # 检查是否只有停用词（如果是，给一个宽松的fallback）
-        has_meaningful_features = len(query_features['entities']) > 0 or len(query_features['professional_terms']) > 0 or len(query_features['keywords']) > 0
-
-        print(f"[RAG-INTENT] 查询特征提取:")
-        print(f"[RAG-INTENT]   实体: {query_features['entities']}")
-        print(f"[RAG-INTENT]   关键词: {query_features['keywords']}")
-        print(f"[RAG-INTENT]   专业术语: {query_features['professional_terms']}")
-
-        # ===== 阶段2：动态计算每个chunk的相关性 =====
-        adjusted_chunks = []
-        all_scores = []
-
-        for i, chunk in enumerate(retrieved_chunks):
-            content = chunk.get('content', '').lower()
-            content_preview = content[:1000]  # 扩大检查范围
-
-            # --- 子评分1：实体匹配度（高权重） ---
-            content_entities = self._extract_entities(content[:500])
-            entity_overlap = len(query_features['entities'] & set(content_entities))
-            entity_score = entity_overlap / max(len(query_features['entities']), 1) if query_features['entities'] else 0.0
-
-            # --- 子评分2：关键词匹配度 ---
-            content_words = set(content_preview.split())
-            keyword_overlap = len(query_features['keywords'] & content_words)
-            keyword_score = keyword_overlap / max(len(query_features['keywords']), 1) if query_features['keywords'] else 0.0
-
-            # --- 子评分3：专业术语匹配度（最高权重）---
-            content_terms = set(re.findall(r'[\u4e00-\u9fa5]{2,4}', content_preview))
-            term_overlap = len(query_features['professional_terms'] & content_terms)
-            term_score = term_overlap / max(len(query_features['professional_terms']), 1) if query_features['professional_terms'] else 0.0
-
-            # --- 子评分4：语义相关性（reranker或向量相似度）---
-            semantic_score = chunk.get('reranker_score', 0)
-            if semantic_score <= 0:
-                semantic_score = chunk.get('similarity', 0)
-            # 如果没有语义分数，使用原始相似度
-            if semantic_score <= 0:
-                semantic_score = 0.5  # 默认中等分数
-
-            # --- 子评分5：查询词在文档中的覆盖率 ---
-            query_tokens = [w for w in query_lower.split() if len(w) >= 2]
-            if query_tokens:
-                matched_tokens = [t for t in query_tokens if t in content_preview]
-                coverage_ratio = len(matched_tokens) / len(query_tokens)
-            else:
-                coverage_ratio = 0.0
-
-            # ===== 动态权重融合 =====
-            # 【关键修复】BM25应该主导排序，分数范围需要正确归一化
-            # 原始BM25分数通常0-10，需要归一化到0-1
-            
-            # 获取原始BM25和关键词分数
-            bm25_raw = chunk.get('bm25_score', 0)
-            keyword_raw = chunk.get('keyword_score', 0)
-            semantic_raw = chunk.get('reranker_score', 0)
-            
-            # 【关键修复】检查查询中的国家/地区名是否在chunk中
-            # 提取查询中的国家名
-            countries_in_query = ['巴西', '中国', '美国', '日本', '韩国', '法国', '德国', '英国', '意大利', '印度', '泰国', '越南', '墨西哥', '俄罗斯', '澳大利亚', '加拿大', '巴西利亚']
-            content_lower = chunk.get('content', '').lower()
-            query_lower = query.lower()
-            
-            country_match_bonus = 0
-            # 【修复】只奖励，不惩罚：如果chunk中提到了查询中的国家，给奖励
-            # 如果查询没有明确指定国家（问的是通用问题），不要降分
-            
-            for country in countries_in_query:
-                if country in query_lower and country in content_lower:
-                    # 查询和chunk都提到了该国家，给予奖励
-                    country_match_bonus = 0.15
-                    print(f"[RAG-COUNTRY] Chunk命中国家: {country}")
-                    break  # 只需匹配一次
-            
-            # 【修复】移除主题纯净度检查，因为这会错误降分很多相关内容
-            # 原因：即使chunk主要讨论其他国家，只要提到了查询中的国家，也是相关的
-            topic_purity_bonus = 0
-            
-            # 【关键修复】确保语义分数归一化到0-1范围
-            # reranker_score 可能是原始分数（>1），需要归一化
-            if semantic_raw > 1:
-                # 归一化到0-1范围（假设原始分数最大约100）
-                semantic_normalized = min(semantic_raw / 100, 1.0)
-            else:
-                semantic_normalized = semantic_raw
-            
-            # 【修复】BM25分数主导：如果BM25 > 0，应该有较高的分数
-            # 归一化因子：假设BM25最大约10，归一化到0.5-1.0范围
-            if bm25_raw > 0:
-                # BM25归一化：使用对数缩放，避免分数差异过大
-                bm25_normalized = 0.4 + min(bm25_raw / 12.0, 0.6)  # 0.4-1.0范围
-                # 有关键词匹配时，BM25占主导
-                combined_score = bm25_normalized * 0.80 + semantic_normalized * 0.20 + country_match_bonus
-            elif keyword_raw > 0:
-                # 有TF-IDF匹配
-                combined_score = min(keyword_raw, 1.0) * 0.65 + semantic_normalized * 0.35 + country_match_bonus
-            else:
-                # 没有关键词匹配，主要依赖语义分数
-                combined_score = semantic_normalized + country_match_bonus
-            
-            # 确保分数不会为负
-            combined_score = max(combined_score, 0)
-
-            # 【修复】意图检查只做微调
-
-            # 更新原始chunk，将意图检查的分数和元数据保存进去
-            chunk['similarity'] = combined_score
-            chunk['intent_match_ratio'] = coverage_ratio
-            chunk['term_match_ratio'] = coverage_ratio  # 添加别名，方便前端使用
-            chunk['topic_match'] = term_score > 0 or entity_score > 0 or semantic_score > 0.5
-            chunk['entity_match_score'] = entity_score
-            chunk['term_match_score'] = term_score
-            chunk['matched_entities'] = list(query_features['entities'] & set(content_entities))
-            chunk['matched_terms'] = list(query_features['professional_terms'] & content_terms)
-            adjusted_chunks.append(chunk)
-            all_scores.append(combined_score)
-
-            # 调试日志（前5个）
-            if i < 5:
-                print(f"[RAG-INTENT] Chunk#{i+1}: bm25={bm25_raw:.2f}, keyword={keyword_raw:.4f}, semantic={semantic_raw:.2f} → combined={combined_score:.3f}")
-
-        # ===== 阶段3：按调整后分数重新排序 =====
-        adjusted_chunks.sort(key=lambda x: x['similarity'], reverse=True)
-
-        avg_score = sum(all_scores) / len(all_scores) if all_scores else 0
-        max_score = max(all_scores) if all_scores else 0
-
-        print(f"[RAG-INTENT] 查询: {query}")
-        print(f"[RAG-INTENT] 查询特征: 实体={len(query_features['entities'])}, 术语={len(query_features['professional_terms'])}, 关键词={len(query_features['keywords'])}")
-        top5_scores = [f"{c['similarity']:.3f}" for c in adjusted_chunks[:5]]
-        print(f"[RAG-INTENT] 调整后Top5分数: {top5_scores}")
-        print(f"[RAG-INTENT] 平均分: {avg_score:.3f}, 最高分: {max_score:.3f}")
-        
-        # 【修改】始终返回所有调整后的结果，不做额外过滤
-        # 只要有任何检索结果，就返回它们
-        return adjusted_chunks, avg_score
-
-    def _extract_entities(self, text: str) -> Set[str]:
-        """
-        从文本中��取命名实体
-        支持中文人名、地名、机构名、专有名词
-        """
-        import re
-        entities = set()
-
-        # 1. 中文大写字母开头的专有名词（如"韩国"、"北京"、"特斯拉"）
-        # 匹配首字母大写或全大写的英文专有名词
-        english_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', text)
-        entities.update([e.lower() for e in english_entities])
-
-        # 2. 中文连续专有名词（2-4字，可能包含常见实体后缀）
-        # 常见国家、城市、地区后缀
-        location_suffixes = ['国', '省', '市', '县', '区', '州', '府', '京', '沪', '深', '港', '澳']
-        # 常见机构后缀
-        org_suffixes = ['公司', '集团', '大学', '学院', '医院', '政府', '部门', '局', '院', '所', '中心']
-        # 常见人名（2-3字）
-        person_pattern = r'[\u4e00-\u9fa5]{2,3}(?:先生|女士|老师|教授|医生|总|经理|主任|总裁)'
-
-        # 匹配可能的地名（2-4字 + 常见后缀）
-        for suffix in location_suffixes:
-            pattern = rf'[\u4e00-\u9fa5]{{1,3}}{suffix}'
-            entities.update(re.findall(pattern, text))
-
-        # 匹配可能的机构名
-        for suffix in org_suffixes:
-            pattern = rf'[\u4e00-\u9fa5]{{2,6}}{suffix}'
-            entities.update(re.findall(pattern, text))
-
-        # 匹配人名
-        persons = re.findall(person_pattern, text)
-        entities.update(persons)
-
-        # 3. 提取数字+单位的专有名词（如"2024年"、"第1名"）
-        numbers = re.findall(r'\d+[年月日届届级款型]', text)
-        entities.update(numbers)
-
-        # 4. 特殊符号标记的专有名词
-        quotes = re.findall(r'["「『《〈]([^"」』》〉]+)["」』》〉]', text)
-        entities.update([q.strip() for q in quotes if 2 <= len(q) <= 10])
-
-        # 5. 大小写混合的词（通常是英文专有名词）
-        mixed_case = re.findall(r'\b[A-Za-z]+[a-z]+[A-Za-z]*\b', text)
-        entities.update([w.lower() for w in mixed_case if len(w) >= 3])
-
-        # 6. 明确列出的常见实体词典（可选扩展）
-        common_entities = {
-            '人工智能', '机器学习', '深度学习', '神经网络', '自然语言处理', '计算机视觉',
-            '区块链', '云计算', '大数据', '物联网', '5g', '6g',
-            'python', 'java', 'javascript', 'c++', 'go', 'rust',
-            '数学', '物理', '化学', '生物', '历史', '地理', '政治', '经济',
-        }
-        for ent in common_entities:
-            if ent in text:
-                entities.add(ent)
-
-        # 过滤掉过于常见的词
-        common_words = {'方法', '过程', '结果', '分析', '研究', '系统', '技术', '问题', '内容', '方面'}
-        entities = {e for e in entities if e not in common_words and len(e.strip()) >= 2}
-
-        return entities
-        
-        # 3. 判断是否真正相关
-        avg_score = sum(match_scores) / len(match_scores) if match_scores else 0
-        max_score = max(match_scores) if match_scores else 0
-        
-        # 必须满足：
-        # 条件1: 平均分 >= 阈值（说明整体检索质量还行）
-        # 条件2: 最高分 >= 阈值*1.5（说明至少有一个结果是真正相关的）
-        # 优化：降低阈值，避免误判
-        is_relevant = avg_score >= threshold and max_score >= threshold * 1.5
-        
-        # 额外放宽条件：如果Reranker分数>=0.6，直接通过
-        if any(c.get('reranker_score', 0) >= 0.6 for c in retrieved_chunks):
-            is_relevant = True
-        
-        # 如果查询涉及特定国家/地区，根据调整后的分数重新排序
-        if query_countries:
-            # 将调整后的分数更新到检索结果中
-            for i, chunk in enumerate(retrieved_chunks):
-                chunk['_adjusted_score'] = match_scores[i]
-            # 按调整后的分数重新排序
-            retrieved_chunks = sorted(retrieved_chunks, key=lambda x: x.get('_adjusted_score', 0), reverse=True)
-        
-        print(f"[RAG-INTENT] 查询意图词: {intent_words}")
-        if query_countries:
-            print(f"[RAG-INTENT] 查询涉及国家: {query_countries}")
-        print(f"[RAG-INTENT] 匹配分数: {[f'{s:.3f}' for s in match_scores]}")
-        print(f"[RAG-INTENT] 平均相关度: {avg_score:.3f}, 最高相关度: {max_score:.3f}")
-        print(f"[RAG-INTENT] 意图相关性: {'✅ 通过' if is_relevant else '❌ 失败'}")
-        
-        return is_relevant, avg_score
+        return list(set(expanded))
 
     async def retrieve(
         self,
@@ -844,6 +557,41 @@ class RAGService:
         """
         if top_k is None:
             top_k = settings.TOP_K
+
+        # 检索结果缓存（含用户隔离维度），重复查询直接命中
+        corpus_version = 0
+        cache_key = None
+        if user_id:
+            corpus_version = await cache_get_int(f"rag:corpus:{user_id}")
+            cache_key = make_cache_key(
+                "rag:retrieve",
+                str(user_id),
+                corpus_version,
+                query,
+                top_k,
+                sorted(str(d) for d in (document_ids or [])),
+            )
+            cached = await cache_get_json(cache_key)
+            if cached is not None:
+                print("[RAG-CACHE] 命中缓存")
+                return cached
+
+        # 用户数据隔离：只允许检索当前用户自己的文档
+        if user_id:
+            allowed_ids = [
+                str(doc_id)
+                for (doc_id,) in self.db.query(Document.id).filter(
+                    Document.user_id == user_id
+                ).all()
+            ]
+            if document_ids:
+                allowed_set = set(allowed_ids)
+                document_ids = [d for d in document_ids if str(d) in allowed_set]
+            else:
+                document_ids = allowed_ids
+            if not document_ids:
+                print("[RAG-HYBRID] 当前用户没有可检索文档")
+                return []
 
         print(f"[RAG-HYBRID] ===== 开始高级检索 =====")
         print(f"[RAG-HYBRID] 查询: {query}")
@@ -872,274 +620,201 @@ class RAGService:
 
         # ===== 第二阶段：多路召回 =====
         try:
-            from sqlalchemy import create_engine
-            engine = create_engine(settings.DATABASE_URL)
-            session = Session(bind=engine)
-            try:
-                # 根据 document_ids 过滤 chunks
-                if document_ids:
-                    chunks = session.query(Chunk).join(Vector).filter(
-                        Chunk.document_id.in_(document_ids)
-                    ).all()
-                    print(f"[RAG-HYBRID] 从指定文档获取 {len(chunks)} 个chunks: {document_ids}")
-                else:
-                chunks = session.query(Chunk).join(Vector).all()
-                    print(f"[RAG-HYBRID] 从所有文档获取 {len(chunks)} 个chunks")
+            chunk_data = self._load_corpus(user_id, document_ids, corpus_version)
+            scope = f"指定文档 {document_ids}" if document_ids else "所有文档"
+            print(f"[RAG-HYBRID] 从{scope}获取 {len(chunk_data)} 个有效chunks")
 
-                # 构建chunk数据缓存
-                chunk_data = {}
-                for chunk in chunks:
-                    if not chunk or not chunk.vector or not chunk.vector.embedding:
-                        continue
+            # ===== 密集检索：pgvector 原生向量相似度检索 =====
+            dense_scores = {}
+            dense_candidate_limit = max(top_k * 10, 100)
+            for q_text, emb in all_embeddings:
+                pg_rows = self._retrieve_with_pgvector(
+                    emb,
+                    dense_candidate_limit,
+                    0.0,
+                    document_ids=document_ids
+                )
+                for row in pg_rows:
+                    chunk_id = row["chunk_id"]
+                    sim = row["similarity"]
+                    prev = dense_scores.get(chunk_id)
+                    if prev is None or sim > prev["score"]:
+                        dense_scores[chunk_id] = {
+                            "score": sim,
+                            "best_query": q_text,
+                            "all_scores": [sim]
+                        }
 
-                        doc = session.query(Document).filter_by(id=chunk.document_id).first()
-
-                    # AI过滤
-                    doc_meta = doc.metadata if doc and doc.metadata else {}
-                    if isinstance(doc_meta, dict):
-                        if doc_meta.get('is_ai_generated', False) or doc_meta.get('ai_generated', False):
-                            continue
-                    fname = (doc.filename or '').lower() if doc else ''
-                    if any(x in fname for x in ['ai生成', 'ai_generated', 'auto-generated']):
-                        continue
-                    content = chunk.content or ''
-                    if content[:200].lower():
-                        if any(x in content[:200].lower() for x in ['ai生成', 'ai generated', '由 ai']):
-                            continue
-
-                    chunk_id = str(chunk.id)
-                    chunk_data[chunk_id] = {
-                        'chunk': chunk,
-                        'doc': doc,
-                        'content': content,
-                        'content_lower': content.lower()
-                    }
-
-                print(f"[RAG-HYBRID] 有效候选: {len(chunk_data)}")
-
-                # ===== 密集检索：向量相似度 =====
-                dense_scores = {}
-                for chunk_id, data in chunk_data.items():
-                    max_sim = 0
-                    best_q = ""
-                    for q_text, emb in all_embeddings:
-                        sim = self.cosine_similarity(emb, data['chunk'].vector.embedding)
-                        if sim > max_sim:
-                            max_sim = sim
-                            best_q = q_text
-                    dense_scores[chunk_id] = {
-                        'score': max_sim,
-                        'best_query': best_q,
-                        'all_scores': [self.cosine_similarity(e, data['chunk'].vector.embedding) for _, e in all_embeddings]
-                    }
-
-                # ===== 稀疏检索：TF-IDF + BM25 =====
-                sparse_scores = {}
-                debug_count = 0
-                for chunk_id, data in chunk_data.items():
-                    # TF-IDF 分数
-                    tfidf_score = self._tfidf_score(query, data['content'])
-                    
-                    # BM25 分数
-                    bm25_score = 0
-                        for variant in query_variants:
-                        bm25_score += self.bm25_score(variant, data['content'])
-                    bm25_score = bm25_score / max(len(query_variants), 1)
-                    
-                    # 术语精确匹配
-                    term_match = sum(1 for t in core_terms if t.lower() in data['content_lower'])
-                    term_ratio = term_match / max(len(core_terms), 1)
-                    
-                    # 组合稀疏分数
-                    sparse_scores[chunk_id] = {
-                        'tfidf': tfidf_score,
-                        'bm25': bm25_score,
-                        'term_match': term_ratio,
-                        'term_count': term_match,
-                        'exact_terms': [t for t in core_terms if t.lower() in data['content_lower']]
-                    }
-                    
-                # 【调试】显示每个chunk的分数（只显示前20个）
-                debug_count += 1
-                if debug_count <= 30:
-                    exact_terms_debug = [t for t in core_terms if t.lower() in data['content_lower']]
-                    print(f"[RAG-SPARSE] #{debug_count}: bm25={bm25_score:.4f}, tfidf={tfidf_score:.4f}, term_match={term_ratio:.2f}, matched_terms={exact_terms_debug}, content={data['content'][:50]}...")
-
-                # ===== 第三阶段：分数归一化 =====
-                # 密集分数归一化
-                max_dense = max((s['score'] for s in dense_scores.values()), default=1)
-                if max_dense <= 0:
-                    max_dense = 1  # 防止除零
-                for chunk_id in dense_scores:
-                    dense_scores[chunk_id]['normalized'] = dense_scores[chunk_id]['score'] / max_dense
-
-                # 稀疏分数归一化
-                max_sparse_candidates = []
-                for s in sparse_scores.values():
-                    candidates = [s['tfidf'], s['bm25'] / 10 if s['bm25'] > 0 else 0]
-                    max_sparse_candidates.append(max(candidates))
-                max_sparse = max(max_sparse_candidates) if max_sparse_candidates else 1
-                if max_sparse <= 0:
-                    max_sparse = 0.001  # 防止除零，给一个最小正值
-                    
-                for chunk_id in sparse_scores:
-                    s = sparse_scores[chunk_id]
-                    s['normalized'] = max(s['tfidf'] / max_sparse, s['bm25'] / (max_sparse * 10))
-
-                # ===== 第四阶段：分数融合 =====
-                # 【彻底优化】BM25分数主导排序，确保关键词匹配的内容排在最前面
-                fused_scores = {}
+            # ===== 稀疏检索：TF-IDF + BM25 =====
+            sparse_scores = {}
+            debug_count = 0
+            for chunk_id, data in chunk_data.items():
+                # TF-IDF 分数
+                tfidf_score = self._tfidf_score(query, data['content'])
                 
-                for chunk_id in chunk_data:
-                    dense = dense_scores.get(chunk_id, {}).get('normalized', 0)
-                    
-                    # 使用原始/绝对BM25分数
-                    sparse_info = sparse_scores.get(chunk_id, {})
-                    raw_bm25 = sparse_info.get('bm25', 0)
-                    raw_tfidf = sparse_info.get('tfidf', 0)
-                    term_match = sparse_info.get('term_match', 0)
-                    
-                    # 【核心修复】BM25主导的混合分数计算
-                    # 策略：如果BM25 > 0，则BM25必须主导排序
-                    # 1. 首先检查是否有BM25匹配（关键词匹配）
-                    # 2. 如果有BM25匹配，使用 BM25 + dense + term
-                    # 3. 如果没有BM25匹配，则使用dense主导
-                    
-                    if raw_bm25 > 0:
-                        # 【修复】BM25分数通常在0-100范围，归一化到0-1
-                        bm25_norm = raw_bm25 / 100  # 假设BM25最大100
-                        hybrid = bm25_norm * 0.4 + dense * 0.5 + term_match * 0.1
-                    else:
-                        # 没有BM25匹配时，使用向量相似度
-                        hybrid = dense * 0.8
-                    
-                    # 保存各个分数供后续使用
-                    vector_score = dense_scores.get(chunk_id, {}).get('score', 0)
-                    
-                    fused_scores[chunk_id] = {
-                        'hybrid_score': hybrid,
-                        'dense_score': dense,
-                        'term_match': term_match,
-                        'exact_terms': sparse_info.get('exact_terms', []),
-                        'best_query': dense_scores.get(chunk_id, {}).get('best_query', ''),
-                        'vector_score': vector_score,
-                        'bm25_score': raw_bm25,
-                        'keyword_score': raw_tfidf,
-                    }
+                # BM25 分数
+                bm25_score = 0
+                for variant in query_variants:
+                    bm25_score += self.bm25_score(variant, data['content'])
+                bm25_score = bm25_score / max(len(query_variants), 1)
+                
+                # 术语精确匹配
+                term_match = sum(1 for t in core_terms if t.lower() in data['content_lower'])
+                term_ratio = term_match / max(len(core_terms), 1)
+                
+                # 组合稀疏分数
+                sparse_scores[chunk_id] = {
+                    'tfidf': tfidf_score,
+                    'bm25': bm25_score,
+                    'term_match': term_ratio,
+                    'term_count': term_match,
+                    'exact_terms': [t for t in core_terms if t.lower() in data['content_lower']]
+                }
+                
+            # 【调试】显示每个chunk的分数（只显示前20个）
+            debug_count += 1
+            if settings.DEBUG and debug_count <= 30:
+                exact_terms_debug = [t for t in core_terms if t.lower() in data['content_lower']]
+                print(f"[RAG-SPARSE] #{debug_count}: bm25={bm25_score:.4f}, tfidf={tfidf_score:.4f}, term_match={term_ratio:.2f}, matched_terms={exact_terms_debug}, content={data['content'][:50]}...")
 
-                # ===== 第四阶段后半：简化过滤 - 只过滤完全无关的chunk =====
-                # 【彻底优化】大幅放宽过滤条件，只过滤掉完全没有相关性的chunk
-                filtered_chunk_ids = []
-                for chunk_id, score_info in fused_scores.items():
-                    bm25 = score_info.get('bm25_score', 0)
-                    keyword = score_info.get('keyword_score', 0)
-                    term_match = score_info.get('term_match', 0)
-                    dense_score = score_info.get('dense_score', 0)
-                    hybrid_score = score_info.get('hybrid_score', 0)
-                    
-                    # 【关键】大幅放宽过滤条件：
-                    # 只要有任何相关性迹象就保留
-                    # 1. BM25 > 0 （有任何词匹配）
-                    # 2. 关键词 > 0.0001 （有轻量关键词匹配）
-                    # 3. 术语匹配 > 0 （有任何核心术语）
-                    # 4. 语义相似度 > 0.3 （中等语义相关就保留）
-                    # 5. 混合分数 > 0.1 （有一点综合相关性）
-                    is_relevant = (
-                        bm25 > 0 or 
-                        keyword > 0.0001 or 
-                        term_match > 0 or 
-                        dense_score > 0.3 or  # 从0.7降到0.3
-                        hybrid_score > 0.1
-                    )
-                    
-                    if is_relevant:
-                        filtered_chunk_ids.append(chunk_id)
-                        else:
-                        print(f"[RAG-FILTER] 过滤掉: bm25={bm25:.4f}, keyword={keyword:.4f}, term={term_match:.2f}, dense={dense_score:.3f}, hybrid={hybrid_score:.3f}")
+            # ===== 第三阶段：分数归一化 =====
+            # 密集分数归一化
+            max_dense = max((s['score'] for s in dense_scores.values()), default=1)
+            if max_dense <= 0:
+                max_dense = 1  # 防止除零
+            for chunk_id in dense_scores:
+                dense_scores[chunk_id]['normalized'] = dense_scores[chunk_id]['score'] / max_dense
+
+            # 稀疏分数归一化
+            max_sparse_candidates = []
+            for s in sparse_scores.values():
+                candidates = [s['tfidf'], s['bm25'] / 10 if s['bm25'] > 0 else 0]
+                max_sparse_candidates.append(max(candidates))
+            max_sparse = max(max_sparse_candidates) if max_sparse_candidates else 1
+            if max_sparse <= 0:
+                max_sparse = 0.001  # 防止除零，给一个最小正值
                 
-                print(f"[RAG-FILTER] 过滤前: {len(fused_scores)}, 过滤后: {len(filtered_chunk_ids)}")
+            for chunk_id in sparse_scores:
+                s = sparse_scores[chunk_id]
+                s['normalized'] = max(s['tfidf'] / max_sparse, s['bm25'] / (max_sparse * 10))
+
+            # ===== 第四阶段：分数融合 =====
+            # 语义相似度为主，BM25/术语匹配作为辅助信号
+            fused_scores = {}
+            max_bm25 = max((s.get('bm25', 0) for s in sparse_scores.values()), default=0)
+
+            for chunk_id in chunk_data:
+                dense = dense_scores.get(chunk_id, {}).get('score', 0)
+
+                # 使用原始/绝对BM25分数
+                sparse_info = sparse_scores.get(chunk_id, {})
+                raw_bm25 = sparse_info.get('bm25', 0)
+                raw_tfidf = sparse_info.get('tfidf', 0)
+                term_match = sparse_info.get('term_match', 0)
+
+                # 0.65 语义 + 0.25 关键词 + 0.10 术语，避免 BM25 压过语义
+                bm25_norm = raw_bm25 / max_bm25 if max_bm25 > 0 else 0
+                hybrid = dense * 0.65 + bm25_norm * 0.25 + term_match * 0.10
                 
-                # 更新chunk_data，移除不相关的chunk
-                filtered_chunk_data = {k: v for k, v in chunk_data.items() if k in filtered_chunk_ids}
-                filtered_fused_scores = {k: v for k, v in fused_scores.items() if k in filtered_chunk_ids}
+                # 保存各个分数供后续使用
+                vector_score = dense_scores.get(chunk_id, {}).get('score', 0)
                 
-                # 如果过滤后没有结果，直接返回空
-                if not filtered_chunk_data:
-                    print(f"[RAG-HYBRID] ⚠️ 过滤后无有效chunk，返回空")
-                    return []
+                fused_scores[chunk_id] = {
+                    'hybrid_score': hybrid,
+                    'dense_score': dense,
+                    'term_match': term_match,
+                    'exact_terms': sparse_info.get('exact_terms', []),
+                    'best_query': dense_scores.get(chunk_id, {}).get('best_query', ''),
+                    'vector_score': vector_score,
+                    'bm25_score': raw_bm25,
+                    'keyword_score': raw_tfidf,
+                }
+
+            # ===== 第四阶段后半：简化过滤 - 只过滤完全无关的chunk =====
+            # 【彻底优化】大幅放宽过滤条件，只过滤掉完全没有相关性的chunk
+            filtered_chunk_ids = []
+            for chunk_id, score_info in fused_scores.items():
+                bm25 = score_info.get('bm25_score', 0)
+                keyword = score_info.get('keyword_score', 0)
+                term_match = score_info.get('term_match', 0)
+                dense_score = score_info.get('dense_score', 0)
+                hybrid_score = score_info.get('hybrid_score', 0)
                 
-                # ===== 第五阶段：简单排序选择 =====
-                # 【优化】直接按混合分数排序，不需要复杂的MMR
-                # 按混合分数降序排序
-                sorted_chunks = sorted(
-                    filtered_fused_scores.items(),
-                    key=lambda x: x[1]['hybrid_score'],
-                    reverse=True
+                # 【关键】大幅放宽过滤条件：
+                # 只要有任何相关性迹象就保留
+                # 1. BM25 > 0 （有任何词匹配）
+                # 2. 关键词 > 0.0001 （有轻量关键词匹配）
+                # 3. 术语匹配 > 0 （有任何核心术语）
+                # 4. 语义相似度 > 0.3 （中等语义相关就保留）
+                # 5. 混合分数 > 0.1 （有一点综合相关性）
+                is_relevant = (
+                    bm25 > 0 or 
+                    keyword > 0.0001 or 
+                    term_match > 0 or 
+                    dense_score > 0.3 or  # 从0.7降到0.3
+                    hybrid_score > 0.1
                 )
                 
-                # 选择前 top_k * 10 个候选
-                top_candidates = [chunk_id for chunk_id, _ in sorted_chunks[:top_k * 10]]
-                
-                print(f"[RAG-HYBRID] 候选数量: {len(top_candidates)}")
+                if is_relevant:
+                    filtered_chunk_ids.append(chunk_id)
+                elif settings.DEBUG:
+                    print(f"[RAG-FILTER] 过滤掉: bm25={bm25:.4f}, keyword={keyword:.4f}, term={term_match:.2f}, dense={dense_score:.3f}, hybrid={hybrid_score:.3f}")
+            
+            print(f"[RAG-FILTER] 过滤前: {len(fused_scores)}, 过滤后: {len(filtered_chunk_ids)}")
+            
+            # 更新chunk_data，移除不相关的chunk
+            filtered_chunk_data = {k: v for k, v in chunk_data.items() if k in filtered_chunk_ids}
+            filtered_fused_scores = {k: v for k, v in fused_scores.items() if k in filtered_chunk_ids}
+            
+            # 如果过滤后没有结果，直接返回空
+            if not filtered_chunk_data:
+                print(f"[RAG-HYBRID] ⚠️ 过滤后无有效chunk，返回空")
+                return []
+            
+            # ===== 第五阶段：简单排序选择 =====
+            # 【优化】直接按混合分数排序，不需要复杂的MMR
+            # 按混合分数降序排序
+            sorted_chunks = sorted(
+                filtered_fused_scores.items(),
+                key=lambda x: x[1]['hybrid_score'],
+                reverse=True
+            )
+            
+            # 选择前 top_k * 10 个候选
+            top_candidates = [chunk_id for chunk_id, _ in sorted_chunks[:top_k * 10]]
+            
+            print(f"[RAG-HYBRID] 候选数量: {len(top_candidates)}")
 
-                # ===== 第六阶段：Cross-Encoder精排（可选）=====
-                # 【优化】如果Reranker可用，进行精排；否则直接使用排序结果
-                final_results = await self._cross_encoder_rerank(
-                    top_candidates, chunk_data, query, fused_scores
-                )
-                
-                print(f"[RAG-HYBRID] 精排后结果数量: {len(final_results)}")
-                if final_results:
-                    print(f"[RAG-HYBRID] 精排结果Top5:")
-                    for i, r in enumerate(final_results[:5]):
-                        bm25_val = r.get('bm25_score', 0)
-                        keyword_val = r.get('keyword_score', 0)
-                        similarity = r.get('similarity', 0)
-                        print(f"[RAG-HYBRID]   #{i+1}: bm25={bm25_val:.4f}, keyword={keyword_val:.4f}, similarity={similarity:.3f}")
-                        print(f"[RAG-HYBRID]       内容: {r.get('content', '')[:60]}...")
+            # ===== 第六阶段：Cross-Encoder精排（可选）=====
+            # 【优化】如果Reranker可用，进行精排；否则直接使用排序结果
+            final_results = await self._cross_encoder_rerank(
+                top_candidates, chunk_data, query, fused_scores
+            )
+            
+            print(f"[RAG-HYBRID] 精排后结果数量: {len(final_results)}")
+            if final_results:
+                print(f"[RAG-HYBRID] 精排结果Top5:")
+                for i, r in enumerate(final_results[:5]):
+                    bm25_val = r.get('bm25_score', 0)
+                    keyword_val = r.get('keyword_score', 0)
+                    similarity = r.get('similarity', 0)
+                    print(f"[RAG-HYBRID]   #{i+1}: bm25={bm25_val:.4f}, keyword={keyword_val:.4f}, similarity={similarity:.3f}")
+                    print(f"[RAG-HYBRID]       内容: {r.get('content', '')[:60]}...")
 
-                # ===== 第七阶段：最终排序和过滤 =====
-                # 【核心优化】以精确短语匹配为主，确保高相关chunk排在前面
+            # ===== 第七阶段：最终排序和过滤 =====
+            # 按统一相关性分数排序（优先 Cross-Encoder，其次混合分）
+            filtered_results = [c for c in final_results if c.get('rank_score', 0) > 0]
+            filtered_results.sort(key=lambda c: c.get('rank_score', 0), reverse=True)
 
-                def final_sort_key(chunk):
-                    """计算综合排序分数 - 精确短语匹配优先"""
-                    phrase_score = chunk.get('phrase_score', 0)  # 精确短语匹配分数
-                    similarity = chunk.get('similarity', 0)
+            print(f"[RAG-HYBRID] 过滤后剩余 {len(filtered_results)} 个结果")
+            
+            # ===== 第八阶段：直接返回精排结果 =====
+            # 【关键修复】不再进行邻接扩展，避免破坏 phrase_score 排序
+            # 邻接扩展会添加没有 phrase_score 的上下文 chunk，导致正确排序被打乱
+            if cache_key:
+                await cache_set_json(cache_key, filtered_results, ttl_seconds=300)
+            return filtered_results
 
-                    # 【核心改进】精确短语匹配分数主导排序
-                    # 【关键修复】确保 phrase > 0 的chunk始终排在 phrase = 0 的chunk前面
-                    # 使用分区策略：先按是否有phrase分组，再组内排序
-                    if phrase_score > 0:
-                        # 有精确短语匹配时：基础分数 1.0-2.0
-                        score = 1.0 + phrase_score
-                    else:
-                        # 没有精确短语匹配时：基础分数 0-1.0
-                        score = similarity / 1000
-
-                    return score
-
-                # 过滤并排序
-                filtered_results = [c for c in final_results if final_sort_key(c) > 0]
-                
-                # 【关键修复】使用元组排序确保正确分区：有phrase的始终排在前
-                # 排序规则：(has_phrase, phrase) 降序，有phrase的排在前面
-                def phrase_sort_key(chunk):
-                    phrase = chunk.get('phrase_score', 0) or 0
-                    has_phrase = 1 if phrase > 0 else 0
-                    # 有phrase的排在前面，同组内按phrase降序
-                    return (has_phrase, phrase)
-                
-                filtered_results.sort(key=phrase_sort_key, reverse=True)
-
-                print(f"[RAG-HYBRID] 过滤后剩余 {len(filtered_results)} 个结果")
-                
-                # ===== 第八阶段：直接返回精排结果 =====
-                # 【关键修复】不再进行邻接扩展，避免破坏 phrase_score 排序
-                # 邻接扩展会添加没有 phrase_score 的上下文 chunk，导致正确排序被打乱
-                return filtered_results
-
-            finally:
-                session.close()
         except Exception as e:
             print(f"[RAG-HYBRID] 错误: {e}")
             import traceback
@@ -1147,9 +822,44 @@ class RAGService:
             return []
 
     async def _expand_query_with_hyde(self, query: str) -> List[str]:
-        """Query Expansion: 只保留原查询，避免引入不相关主题"""
-        # 核心原则：只使用原查询进行检索，避免HyDE扩展引入不相关内容
-        return [query]  # 只保留原查询
+        """Query Expansion：原查询 + 中文关键词串 + 同义词改写，最多 3 条，避免引入无关主题"""
+        variants = [query]
+        question_words = {
+            '什么', '哪些', '怎么', '怎样', '如何', '为什么', '是否', '多少', '哪里',
+            '哪个', '请问', '介绍', '一下', '以及', '还是', '可以', '的', '了', '是', '有'
+        }
+        synonyms = {
+            '做法': '方法 制作', '制作方法': '做法 制作', '原理': '机制 工作原理',
+            '区别': '差异 不同', '优点': '优势 好处', '缺点': '不足 劣势',
+            '原因': '成因 为什么', '作用': '功能 用途', '组成': '构成 结构',
+            '定义': '概念 含义', '历史': '起源 发展', '分类': '种类 类型',
+            '特点': '特征 特性', '影响': '作用 效果', '步骤': '流程 操作',
+            '方法': '方式 途径', '技巧': '技法 诀窍',
+        }
+        try:
+            tokens = [
+                w for w in self._tokenize(query)
+                if len(w) >= 2 and w not in question_words
+            ]
+            if tokens and len(tokens) <= 8:
+                variants.append(" ".join(tokens))
+
+            replaced = query
+            for src, dst in synonyms.items():
+                if src in replaced:
+                    replaced = replaced.replace(src, dst, 1)
+                    break
+            if replaced != query:
+                variants.append(replaced)
+        except Exception as e:
+            print(f"[RAG-HYBRID] 查询扩展失败: {e}")
+
+        unique: List[str] = []
+        for v in variants:
+            v = (v or "").strip()
+            if v and v not in unique and len(v) >= 2:
+                unique.append(v)
+        return unique[:3]
 
     async def _expand_adjacent_chunks(
         self,
@@ -1434,7 +1144,7 @@ class RAGService:
                     'document_id': doc_id,
                     'document_title': doc.filename if doc else 'Unknown',
                     'chunk_index': chunk.chunk_index,
-                    'metadata': doc.metadata if doc else {},
+                    'metadata': doc.metadata_ if doc else {},
                     'bm25_score': 0,
                     'keyword_score': 0,
                     'reranker_score': 0,
@@ -1448,19 +1158,31 @@ class RAGService:
         return adjacent_chunks
 
     def _tfidf_score(self, query: str, document: str) -> float:
-        """计算TF-IDF风格的相关性分数"""
-        query_terms = query.lower().split()
+        """计算关键词相关性：jieba 分词后的查询词覆盖率 × 词频强度（0~1）"""
+        query_terms = [
+            t for t in self._tokenize(query)
+            if len(t) >= 2 and not t.isdigit()
+        ]
+        if not query_terms:
+            return 0.0
+
         doc_lower = document.lower()
-        
-        # 简单TF计算
-        query_tf = {}
-        for term in query_terms:
+        doc_len = max(len(self._tokenize(document)), 1)
+        unique_terms = set(query_terms)
+
+        tf_values = []
+        for term in unique_terms:
             count = doc_lower.count(term)
             if count > 0:
-                query_tf[term] = count / max(len(doc_lower.split()), 1)
-        
-        # 返回最大TF值
-        return max(query_tf.values()) if query_tf else 0
+                tf_values.append(count / doc_len)
+        if not tf_values:
+            return 0.0
+
+        coverage = len(tf_values) / len(unique_terms)
+        avg_tf = sum(tf_values) / len(tf_values)
+        # 覆盖率为主，词频强度做轻微加权
+        strength = min(1.0, avg_tf * 10)
+        return round(min(1.0, coverage * (0.6 + 0.4 * strength)), 4)
 
     async def _mmr_diversity_select(
         self, 
@@ -1537,13 +1259,11 @@ class RAGService:
         chinese_phrases = re.findall(r'[\u4e00-\u9fff]{2,4}', query)
         important_phrases.extend(chinese_phrases)
         
-        # 菜系名、招牌菜等重要词组
-        key_terms = ['闽菜', '川菜', '粤菜', '湘菜', '鲁菜', '苏菜', '浙菜', '徽菜', '京菜',
-                     '佛跳墙', '荔枝肉', '招牌菜', '三大流派', '福州菜', '闽南菜', '闽西菜']
-        
-        for term in key_terms:
-            if term in query:
-                important_phrases.append(term)
+        # 通用短语候选：中文片段 + 分词结果（不依赖领域词表）
+        stopwords = {'什么', '哪些', '哪个', '怎么', '如何', '怎样', '为什么', '可以', '这个', '那个', '以及', '还有', '主要', '具有'}
+        for token in self._tokenize(query):
+            if len(token) >= 2 and not token.isdigit() and token not in stopwords:
+                important_phrases.append(token)
         
         # 过滤掉单字符（太泛）
         important_phrases = [p for p in important_phrases if len(p) >= 2]
@@ -1586,12 +1306,14 @@ class RAGService:
                 chunks_to_score.append({
                     'chunk_id': chunk_id,
                     'content': chunk_data[chunk_id]['content'],
-                    'doc': chunk_data[chunk_id]['doc']
                 })
         
         if not chunks_to_score:
             return []
-        
+
+        # 控制重排候选数量，避免 CPU 推理过慢
+        chunks_to_score = chunks_to_score[:6]
+
         # 【关键改进】计算精确短语匹配分数
         phrase_scores = {}
         for chunk_info in chunks_to_score:
@@ -1605,9 +1327,12 @@ class RAGService:
         
         if reranker is not None:
             try:
-                # 批量预测
-                pairs = [(query, chunk['content']) for chunk in chunks_to_score]
-                scores = reranker.predict(pairs, show_progress_bar=False)
+                # 批量预测（截断长文本，控制推理耗时）
+                pairs = [(query, chunk['content'][:400]) for chunk in chunks_to_score]
+                # CPU 推理放到线程池，避免阻塞事件循环
+                scores = await asyncio.to_thread(
+                    reranker.predict, pairs, show_progress_bar=False
+                )
 
                 # 将numpy数组转换为列表，避免数组判断问题
                 if hasattr(scores, 'tolist'):
@@ -1628,45 +1353,32 @@ class RAGService:
                     chunk_id = chunk['chunk_id']
                     fuse_info = fused_scores.get(chunk_id, {}) if fused_scores else {}
 
-                    # 原始混合分数（包含BM25/TF-IDF）
-                    original_score = fuse_info.get('hybrid_score', 0.5)
-
-                    # 基于Reranker排名的分数
-                    rank = sum(1 for s in scores if s > raw_score) + 1
-                    rank_score = 1 - (rank - 1) / len(scores) * 0.3  # 范围[0.7, 1.0]
-
-                    # 【关键改进】精确短语匹配主导排序
+                    # 原始混合分数（语义为主）
+                    original_score = fuse_info.get('hybrid_score', 0)
+                    dense_sim = fuse_info.get('vector_score', 0)
                     phrase_score = phrase_scores.get(chunk_id, 0)
-                    
-                    # 【核心修复】使用合理的分数范围用于显示
-                    # 排序由 phrase_sort_key 函数控制（使用元组分区）
-                    # 【优化】高相关的内容应该显示更高的分数
-                    if phrase_score > 0:
-                        # 有精确短语匹配：高分数 0.75-0.98
-                        final_score = min(0.75 + phrase_score * 0.23, 0.98)
-                    else:
-                        # 无精确短语匹配：分数基于其他因素 0.3-0.75
-                        final_score = min(rank_score * 0.3 + original_score * 0.3 + 0.3, 0.75)
-                    
-                    # 【调试】
-                    if phrase_score > 0:
-                        print(f"[RERANK] chunk_id={chunk_id[:8]}..., phrase={phrase_score:.3f}, final={final_score:.3f}")
+
+                    # CrossEncoder 已内置 sigmoid，输出即 0-1 概率；仅当是原始 logit 时才再映射
+                    prob = float(raw_score) if 0.0 <= raw_score <= 1.0 else float(1 / (1 + np.exp(-raw_score)))
+                    rank_score = prob * 0.75 + original_score * 0.25 + phrase_score * 0.10
 
                     results.append({
                         'chunk_id': chunk_id,
                         'content': chunk['content'],
-                        'similarity': float(final_score),
-                        'reranker_score': float(raw_score),
-                        'document_id': str(chunk['doc'].id) if chunk['doc'] else '',
-                        'document_title': chunk['doc'].filename if chunk['doc'] else 'Unknown',
-                        'chunk_index': chunk_data[chunk_id]['chunk'].chunk_index,
-                        'metadata': chunk['doc'].metadata if chunk['doc'] else {},
-                        # 保存原始检索分数
-                        'vector_score': fuse_info.get('vector_score', final_score),
+                        # 综合相关性：以精排概率（真实语义相关度）为主，向量余弦为辅
+                        'similarity': float(prob * 0.75 + dense_sim * 0.25),
+                        'rank_score': float(rank_score),
+                        'hybrid_score': float(original_score),
+                        'reranker_score': float(prob),
+                        'document_id': chunk_data[chunk_id]['document_id'],
+                        'document_title': chunk_data[chunk_id]['document_title'],
+                        'chunk_index': chunk_data[chunk_id]['chunk_index'],
+                        'metadata': chunk_data[chunk_id]['metadata'],
+                        'vector_score': float(dense_sim),
                         'bm25_score': fuse_info.get('bm25_score', 0),
                         'keyword_score': fuse_info.get('keyword_score', 0),
                         'matched_terms': fuse_info.get('exact_terms', []),
-                        'phrase_score': phrase_score  # 新增：精确短语匹配分数
+                        'phrase_score': phrase_score
                     })
             except Exception as e:
                 print(f"[RAG-HYBRID] Reranker错误: {e}")
@@ -1675,50 +1387,63 @@ class RAGService:
                     chunk_id = chunk['chunk_id']
                     fuse_info = fused_scores.get(chunk_id, {}) if fused_scores else {}
                     phrase_score = phrase_scores.get(chunk_id, 0)
+                    dense_sim = fuse_info.get('vector_score', 0)
+                    original_score = fuse_info.get('hybrid_score', 0)
+                    rank_score = original_score * 0.85 + phrase_score * 0.15
                     results.append({
                         'chunk_id': chunk_id,
                         'content': chunk['content'],
-                        'similarity': fuse_info.get('hybrid_score', 0.5),  # 使用混合分数
+                        'similarity': float(dense_sim),
+                        'rank_score': float(rank_score),
+                        'hybrid_score': float(original_score),
                         'reranker_score': 0.0,
-                        'document_id': str(chunk['doc'].id) if chunk['doc'] else '',
-                        'document_title': chunk['doc'].filename if chunk['doc'] else 'Unknown',
-                        'chunk_index': chunk_data[chunk_id]['chunk'].chunk_index,
-                        'metadata': chunk['doc'].metadata if chunk['doc'] else {},
-                        # 【关键】保留BM25和关键词分数
+                        'document_id': chunk_data[chunk_id]['document_id'],
+                        'document_title': chunk_data[chunk_id]['document_title'],
+                        'chunk_index': chunk_data[chunk_id]['chunk_index'],
+                        'metadata': chunk_data[chunk_id]['metadata'],
+                        'vector_score': float(dense_sim),
                         'bm25_score': fuse_info.get('bm25_score', 0),
                         'keyword_score': fuse_info.get('keyword_score', 0),
                         'matched_terms': fuse_info.get('exact_terms', []),
                         'phrase_score': phrase_score
                     })
         else:
-            # 无Reranker时使用短语匹配和混合分数
+            # 无Reranker时以混合分数为主，短语匹配作为小幅加权
             for chunk in chunks_to_score:
                 chunk_id = chunk['chunk_id']
                 fuse_info = fused_scores.get(chunk_id, {}) if fused_scores else {}
                 phrase_score = phrase_scores.get(chunk_id, 0)
-                original_score = fuse_info.get('hybrid_score', 0.5)
-                
-                # 短语匹配主导
-                final_score = phrase_score * 0.6 + original_score * 0.4
-                
+                original_score = fuse_info.get('hybrid_score', 0)
+                dense_sim = fuse_info.get('vector_score', 0)
+
+                rank_score = original_score * 0.85 + phrase_score * 0.15
+
                 results.append({
                     'chunk_id': chunk_id,
                     'content': chunk['content'],
-                    'similarity': float(final_score),
+                    'similarity': float(dense_sim),
+                    'rank_score': float(rank_score),
+                    'hybrid_score': float(original_score),
                     'reranker_score': 0.0,
-                    'document_id': str(chunk['doc'].id) if chunk['doc'] else '',
-                    'document_title': chunk['doc'].filename if chunk['doc'] else 'Unknown',
-                    'chunk_index': chunk_data[chunk_id]['chunk'].chunk_index,
-                    'metadata': chunk['doc'].metadata if chunk['doc'] else {},
-                    # 【关键】保留BM25和关键词分数
+                    'document_id': chunk_data[chunk_id]['document_id'],
+                    'document_title': chunk_data[chunk_id]['document_title'],
+                    'chunk_index': chunk_data[chunk_id]['chunk_index'],
+                    'metadata': chunk_data[chunk_id]['metadata'],
+                    'vector_score': float(dense_sim),
                     'bm25_score': fuse_info.get('bm25_score', 0),
                     'keyword_score': fuse_info.get('keyword_score', 0),
                     'matched_terms': fuse_info.get('exact_terms', []),
                     'phrase_score': phrase_score
                 })
-        
-        # 【关键改进】按精确短语匹配优先排序
-        results.sort(key=lambda x: (x.get('phrase_score', 0), x['similarity']), reverse=True)
+
+        # 丢弃明显不相关的候选，避免噪声块拉低整体置信度（精排不可用时保持原样）
+        if reranker is not None and results:
+            print(f"[RAG-RERANK] 过滤前候选精排分数: {[round(r.get('reranker_score', 0), 3) for r in results[:10]]}")
+            kept = [r for r in results if r.get('reranker_score', 0) >= 0.20]
+            results = kept if kept else results[:1]
+
+        # 按统一相关性分数排序
+        results.sort(key=lambda x: x.get('rank_score', 0), reverse=True)
         
         # 【关键修复】确保所有 similarity 在 [0, 1] 范围内
         # 检查是否有异常大的分数
@@ -1831,11 +1556,28 @@ class RAGService:
         # 按最终分数排序
         return sorted(chunks, key=lambda x: x.get("final_score", 0), reverse=True)
 
-    def _retrieve_with_pgvector(self, query_embedding: List[float], top_k: int, threshold: float) -> List[Dict[str, Any]]:
+    def _retrieve_with_pgvector(
+        self,
+        query_embedding: List[float],
+        top_k: int,
+        threshold: float,
+        document_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """使用 pgvector 进行高效相似度搜索"""
         from sqlalchemy import text
 
         vector_str = '[' + ','.join(map(str, query_embedding)) + ']'
+
+        params = {
+            "vector": vector_str,
+            "threshold": threshold,
+            "top_k": top_k
+        }
+
+        doc_filter = ""
+        if document_ids:
+            doc_filter = "AND c.document_id = ANY(CAST(:document_ids AS uuid[]))"
+            params["document_ids"] = [str(doc_id) for doc_id in document_ids]
 
         sql = text(f"""
             SELECT
@@ -1845,21 +1587,18 @@ class RAGService:
                 c.chunk_index,
                 d.filename as document_title,
                 d.metadata as document_metadata,
-                1 - (v.embedding <=> :vector) as similarity
+                1 - (v.embedding <=> CAST(:vector AS vector)) as similarity
             FROM vectors v
             JOIN chunks c ON v.chunk_id = c.id
             JOIN documents d ON c.document_id = d.id
-            WHERE 1 - (v.embedding <=> :vector) >= :threshold
-            ORDER BY v.embedding <=> :vector
+            WHERE 1 - (v.embedding <=> CAST(:vector AS vector)) >= :threshold
+            {doc_filter}
+            ORDER BY v.embedding <=> CAST(:vector AS vector)
             LIMIT :top_k
         """)
 
         try:
-            result = self.db.execute(sql, {
-                "vector": vector_str,
-                "threshold": threshold,
-                "top_k": top_k
-            }).fetchall()
+            result = self.db.execute(sql, params).fetchall()
 
             return [
                 {
@@ -1920,6 +1659,102 @@ class RAGService:
 
         return "\n\n---\n\n".join(context_parts)
 
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        """中文分词：优先 jieba；未安装时退化为字级二元组，避免按空格切分导致整句成词"""
+        text = (text or "").lower()
+        try:
+            import jieba
+            return [w for w in jieba.cut(text) if w.strip()]
+        except Exception:
+            cleaned = "".join(ch for ch in text if ch.isalnum())
+            bigrams = [cleaned[i:i + 2] for i in range(len(cleaned) - 1)]
+            return bigrams + ([cleaned] if cleaned else [])
+
+    @staticmethod
+    def _confidence_level(score: float) -> str:
+        if score >= 0.90:
+            return "极高"
+        if score >= 0.75:
+            return "高"
+        if score >= 0.55:
+            return "中"
+        if score >= 0.35:
+            return "低"
+        return "极低"
+
+    def calculate_answer_groundedness(self, answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """答案级校验：逐句检查答案是否被引用块支持（词覆盖 + 精排语义兜底）"""
+        empty = {
+            "score": 0.0, "supported_ratio": 0.0, "supported_sentences": 0,
+            "total_sentences": 0, "unsupported_claims": []
+        }
+        if not answer or not chunks:
+            return empty
+
+        stop_words = {
+            '根据', '参考', '资料', '以上', '结合', '此外', '另外', '首先', '其次', '最后',
+            '可以', '需要', '进行', '通过', '方面', '相关', '内容', '信息', '问题',
+            '的', '了', '是', '在', '和', '与', '及', '或', '也', '都', '就', '而',
+            '对', '为', '以', '等', '这', '那', '有', '其', '中', '并', '被', '将'
+        }
+
+        def terms_of(text: str) -> set:
+            return {w for w in self._tokenize(text) if len(w) >= 2 and w not in stop_words}
+
+        chunk_terms = [terms_of(c.get('content', '')) for c in chunks]
+        sentences = [s.strip() for s in re.split(r'[。！？!?\n；;]', answer) if len(s.strip()) >= 8]
+        supported = 0
+        unsupported = []
+        reranker = self.reranker
+
+        for sent in sentences:
+            sent_terms = terms_of(sent)
+            if not sent_terms:
+                continue
+            best = max((len(sent_terms & ct) / len(sent_terms)) for ct in chunk_terms) if chunk_terms else 0.0
+
+            # 词面重合不足时，用精排判断是否为同义改写（避免把正常改写误判为无依据）
+            if best < 0.5 and reranker is not None:
+                try:
+                    pairs = [(sent, (c.get('content') or '')[:400]) for c in chunks[:3]]
+                    probs = reranker.predict(pairs, show_progress_bar=False)
+                    best = max(best, float(max(probs)))
+                except Exception:
+                    pass
+
+            if best >= 0.5:
+                supported += 1
+            else:
+                unsupported.append(sent[:60])
+
+        total = len(sentences)
+        ratio = supported / max(total, 1)
+        return {
+            "score": round(min(0.98, ratio), 4),
+            "supported_ratio": round(ratio, 4),
+            "supported_sentences": supported,
+            "total_sentences": total,
+            "unsupported_claims": unsupported[:5],
+        }
+
+    def apply_groundedness(
+        self,
+        evidence_report: Dict[str, Any],
+        answer: str,
+        chunks: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """用答案对证据的支撑度校准最终置信度，区分"检索相关"与"答案真实有据" """
+        if not evidence_report or not evidence_report.get("chunks"):
+            return evidence_report
+        groundedness = self.calculate_answer_groundedness(answer, chunks)
+        evidence_report["groundedness"] = groundedness
+        base = float(evidence_report.get("confidence", 0) or 0)
+        adjusted = min(0.98, base * 0.75 + float(groundedness["score"]) * 0.25)
+        evidence_report["confidence"] = round(adjusted, 4)
+        evidence_report["confidence_level"] = self._confidence_level(adjusted)
+        return evidence_report
+
     def _calculate_answerability_score(self, query: str, chunk_content: str) -> float:
         """
         答案可答性评分 - 评估检索结果是否能回答该问题
@@ -1968,7 +1803,7 @@ class RAGService:
         
         # 3. 实体覆盖度
         # 提取查询中的重要实体（长度>1的词）
-        query_entities = [w for w in query_lower.split() if len(w) >= 2]
+        query_entities = [w for w in self._tokenize(query) if len(w) >= 2]
         if query_entities:
             covered_entities = sum(1 for e in query_entities if e in content_lower)
             entity_coverage = covered_entities / len(query_entities)
@@ -1988,7 +1823,7 @@ class RAGService:
         }
         """
         query_lower = query.lower()
-        query_terms = set(query_lower.split())
+        query_terms = set(self._tokenize(query))
         
         # 过滤停用词（只保留最常见的虚词）
         stop_words = {'的', '了', '是', '在', '和', '与', '及', '或', '吗', '呢', '吧', '啊', '的', '了'}
@@ -2105,7 +1940,7 @@ class RAGService:
         content_lower = chunk_content.lower()
         
         # 1. 检测查询复杂度
-        query_complexity = len(query_lower.split())
+        query_complexity = len(self._tokenize(query))
         
         # 2. 评估内容详细度
         content_detail = len(chunk_content)

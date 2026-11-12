@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from core import get_db
 from services import ChatService
-from models import User, Citation
+from models import User
 from core.auth import decode_access_token
 import uuid
 import json
@@ -21,24 +21,19 @@ def get_authenticated_user_id(
     token: Optional[str] = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ) -> uuid.UUID:
-    """获取认证用户 ID，未登录返回默认用户"""
-    if token:
-        payload = decode_access_token(token)
-        if payload:
-            user_id = payload.get("sub")
-            if user_id:
-                try:
-                    user = db.query(User).filter(User.id == user_id).first()
-                    if user:
-                        return user.id
-                except:
-                    pass
-    
-    default_user = db.query(User).filter(User.username == "default_user").first()
-    if default_user:
-        return default_user.id
-    
-    return uuid.UUID("00000000-0000-0000-0000-000000000001")
+    """获取认证用户 ID，未登录或无效 token 返回 401"""
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录或登录已过期")
+
+    payload = decode_access_token(token)
+    if not payload or not payload.get("sub"):
+        raise HTTPException(status_code=401, detail="未登录或登录已过期")
+
+    user = db.query(User).filter(User.id == payload["sub"]).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="未登录或登录已过期")
+
+    return user.id
 
 
 class MessageCreate(BaseModel):
@@ -108,7 +103,7 @@ async def get_conversation(
     user_id: uuid.UUID = Depends(get_authenticated_user_id)
 ):
     service = ChatService(db)
-    conversation = await service.get_conversation(conversation_id, user_id)
+    conversation = await service.get_conversation(conversation_id, user_id, with_citations=True)
 
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -121,18 +116,14 @@ async def get_conversation(
         chunks_data = []
 
         if not evidence:
-            citations = db.query(Citation).filter(Citation.message_id == str(m.id)).all()
+            citations = m.citations
 
             if citations:
-                from models import Chunk, Document
-
                 sorted_citations = sorted(citations, key=lambda x: x.rank or 999)
 
                 for c in sorted_citations:
-                    chunk = db.query(Chunk).filter(Chunk.id == c.chunk_id).first()
-                    doc = None
-                    if chunk:
-                        doc = db.query(Document).filter(Document.id == chunk.document_id).first()
+                    chunk = c.chunk
+                    doc = chunk.document if chunk else None
 
                     full_content = c.chunk_content if c.chunk_content else (chunk.content if chunk and chunk.content else "")
                     content_preview = full_content
@@ -202,7 +193,7 @@ async def get_conversation(
                 "note": "检索结果置信度过低"
             }
 
-        citations = db.query(Citation).filter(Citation.message_id == str(m.id)).all()
+        citations = m.citations
         valid_citations = [c for c in citations if c.chunk_id]
 
         message_list.append({

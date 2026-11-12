@@ -205,13 +205,13 @@ class AdvancedChunker:
                 chunk_sentences = sentences[boundaries[i-1]:boundary_idx + 1]
             
             if chunk_sentences:
-                chunk = '。'.join(chunk_sentences) if '。' in text else ' '.join(chunk_sentences)
+                chunk = self._join_sentences(chunk_sentences)
                 if chunk.strip():
                     chunks.append(chunk.strip())
         
         # 添加最后一块
         if boundaries[-1] < len(sentences) - 1 if boundaries else True:
-            last_chunk = '。'.join(sentences[boundaries[-1] + 1:]) if '。' in text else ' '.join(sentences[boundaries[-1] + 1:])
+            last_chunk = self._join_sentences(sentences[boundaries[-1] + 1:])
             if last_chunk.strip():
                 chunks.append(last_chunk.strip())
         
@@ -232,9 +232,9 @@ class AdvancedChunker:
         if len(sentences) <= 1:
             return [text] if len(text) >= self.min_chunk_size else []
         
-        # 计算句子嵌入
+        # 计算句子嵌入（切块运行在同步线程中，必须使用同步 embed）
         try:
-            embeddings = self.embedding_model.embed_async(sentences)
+            embeddings = self.embedding_model.embed(sentences)
         except Exception as e:
             print(f"深度语义切块嵌入失败: {e}")
             return self.chunk_smart_hybrid(text)
@@ -266,14 +266,14 @@ class AdvancedChunker:
         chunks = []
         start = 0
         for bp in break_points:
-            chunk = '。'.join(sentences[start:bp]) if '。' in text else ' '.join(sentences[start:bp])
+            chunk = self._join_sentences(sentences[start:bp])
             if len(chunk) >= self.min_chunk_size:
                 chunks.append(chunk)
             start = bp
         
         # 最后一块
         if start < len(sentences):
-            last = '。'.join(sentences[start:]) if '。' in text else ' '.join(sentences[start:])
+            last = self._join_sentences(sentences[start:])
             if len(last) >= self.min_chunk_size or not chunks:
                 chunks.append(last)
         
@@ -381,9 +381,9 @@ class AdvancedChunker:
         # 【新增】检测主题切换边界（国家名、章节标题等）
         topic_boundaries = self._detect_topic_boundaries(sentences)
         
-        # 尝试获取嵌入
+        # 尝试获取嵌入（切块运行在同步线程中，必须使用同步 embed）
         try:
-            embeddings = self.embedding_model.embed_async(sentences)
+            embeddings = self.embedding_model.embed(sentences)
         except:
             # 如果嵌入失败，使用关键词重叠度
             return self._detect_keyword_boundaries(sentences)
@@ -402,31 +402,31 @@ class AdvancedChunker:
     
     def _detect_topic_boundaries(self, sentences: List[str]) -> List[int]:
         """
-        检测主题切换边界
-        
-        识别国家名切换、章节标题等主题标记
+        检测主题切换边界（通用结构规则，不依赖任何领域词汇）
+
+        识别：
+        - Markdown 标题、第X章/节、中文序号标题、数字编号标题
+        - 明显是标题的短句（无句末标点且长度较短）
         """
-        # 常见国家美食主题标记
-        country_patterns = [
-            '中国美食', '美国美食', '日本美食', '韩国美食', '法国美食', '德国美食',
-            '英国美食', '意大利美食', '印度美食', '泰国美食', '越南美食', '墨西哥美食',
-            '俄罗斯美食', '澳大利亚美食', '巴西美食', '西班牙美食', '葡萄牙美食',
-            '中国', '美国', '日本', '韩国', '法国', '德国', '英国', '意大利',
-            '印度', '泰国', '越南', '墨西哥', '俄罗斯', '澳大利亚', '巴西', '西班牙',
-            '非洲美食', '美洲美食', '欧洲美食', '亚洲美食',  # 大陆/地区
-            '第一章', '第二章', '第三章', '第四章', '第五章',  # 章节标题
-            '一、', '二、', '三、', '四、', '五、',  # 列表标题
-        ]
-        
+        heading_pattern = re.compile(
+            r'^\s*(#{1,6}\s+|第[一二三四五六七八九十百\d]+[章节篇部分]|'
+            r'[一二三四五六七八九十]+[、.．]|'
+            r'(\d+(\.\d+)*)[、.．\s]|'
+            r'[（(][一二三四五六七八九十\d]+[）)])'
+        )
+        sentence_endings = ('。', '！', '？', '；', '…', '.', '!', '?', ';')
+
         boundaries = []
         for i, sentence in enumerate(sentences):
-            for pattern in country_patterns:
-                if pattern in sentence:
-                    # 检测到主题标记，如果不在第一个句子，就在之前切分
-                    if i > 0:
-                        boundaries.append(i)
-                    break
-        
+            text = sentence.strip()
+            if not text:
+                continue
+            is_heading = bool(heading_pattern.match(text))
+            # 无句末标点的短句通常是独立标题行
+            is_short_title = len(text) <= 20 and not text.endswith(sentence_endings)
+            if (is_heading or is_short_title) and i > 0:
+                boundaries.append(i)
+
         return boundaries
 
     def _detect_keyword_boundaries(self, sentences: List[str]) -> List[int]:
@@ -524,6 +524,26 @@ class AdvancedChunker:
         """计算块列表的总长度"""
         return sum(len(c) for c in chunks)
 
+    def _join_sentences(self, sentences: List[str]) -> str:
+        """拼接句子：句尾已有标点时不再重复添加分隔符，英文句号后补空格"""
+        chinese_endings = ('。', '！', '？', '；', '…')
+        english_endings = ('.', '!', '?', ';')
+        parts: List[str] = []
+        for sentence in sentences:
+            text = sentence.strip()
+            if not text:
+                continue
+            if parts:
+                last = parts[-1]
+                if last.endswith(chinese_endings):
+                    pass
+                elif last.endswith(english_endings):
+                    parts[-1] = last + ' '
+                else:
+                    parts[-1] = last + '。'
+            parts.append(text)
+        return ''.join(parts)
+
     def _create_chunks_from_boundaries(
         self,
         sentences: List[str],
@@ -533,20 +553,20 @@ class AdvancedChunker:
     ) -> List[str]:
         """基于边界创建块"""
         if not boundaries:
-            return ['。'.join(sentences)] if '。' in ''.join(sentences) else [' '.join(sentences)]
+            return [self._join_sentences(sentences)]
         
         chunks = []
         start = 0
         
         for boundary in boundaries:
-            chunk = '。'.join(sentences[start:boundary])
+            chunk = self._join_sentences(sentences[start:boundary])
             if chunk.strip():
                 chunks.append(chunk.strip())
             start = boundary
         
         # 最后一块
         if start < len(sentences):
-            last = '。'.join(sentences[start:])
+            last = self._join_sentences(sentences[start:])
             if last.strip():
                 chunks.append(last.strip())
         
@@ -560,7 +580,7 @@ class AdvancedChunker:
         
         chunks = []
         for i in range(0, len(sentences), target_sentences):
-            chunk = '。'.join(sentences[i:i + target_sentences])
+            chunk = self._join_sentences(sentences[i:i + target_sentences])
             if chunk.strip():
                 chunks.append(chunk.strip())
         

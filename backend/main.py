@@ -22,9 +22,11 @@ app = FastAPI(
 )
 
 # CORS 配置
+_cors_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins or ["http://localhost:3000"],
+    allow_origin_regex=settings.CORS_ORIGIN_REGEX,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,10 +48,37 @@ async def startup_event():
         from core.database import Base, engine
         from models import User
         from sqlalchemy.orm import Session
-        
+        from sqlalchemy import text
+
+        # 确保 pgvector 扩展可用（已启用时跳过，避免无谓的 schema 变更）
+        with engine.connect() as conn:
+            has_vector = conn.execute(
+                text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+            ).scalar()
+            if not has_vector:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.commit()
+
         # 创建数据库表
         Base.metadata.create_all(bind=engine)
         print("Database tables created successfully")
+
+        # 常用查询索引（幂等创建，避免外键过滤全表扫描）
+        with engine.connect() as conn:
+            for stmt in (
+                "CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents (user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations (user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages (conversation_id)",
+                "CREATE INDEX IF NOT EXISTS idx_citations_message_id ON citations (message_id)",
+                "CREATE INDEX IF NOT EXISTS idx_citations_chunk_id ON citations (chunk_id)",
+                "CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks (document_id)",
+                "CREATE INDEX IF NOT EXISTS idx_memories_user_id ON memories (user_id)",
+            ):
+                conn.execute(text(stmt))
+            conn.commit()
+
+        if not settings.APP_SECRET or settings.APP_SECRET.startswith("default"):
+            print("WARNING: APP_SECRET 使用默认值，生产环境请在 .env 中配置随机密钥")
         
         # 创建默认用户
         with Session(engine) as session:
@@ -68,12 +97,34 @@ async def startup_event():
                 print("Default user created: admin")
             else:
                 print("Default user already exists: admin")
-                
+
+        # 后台预热重排模型，避免首次检索时等待模型加载
+        def _warm_reranker():
+            try:
+                from core.database import SessionLocal
+                from services.rag_service import RAGService
+                db = SessionLocal()
+                try:
+                    RAGService(db).reranker
+                finally:
+                    db.close()
+            except Exception as e:
+                print(f"Reranker warmup failed: {e}")
+
+        import threading
+        threading.Thread(target=_warm_reranker, daemon=True).start()
+
     except Exception as e:
         print(f"Error during startup: {e}")
         import traceback
         traceback.print_exc()
         raise
+
+@app.get("/health")
+async def health():
+    """容器健康检查"""
+    return {"status": "healthy"}
+
 
 @app.get("/")
 async def root():

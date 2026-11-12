@@ -1,4 +1,5 @@
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000'
+// 空字符串表示同源访问（由 nginx 反向代理 /api 到后端）
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://127.0.0.1:8000'
 
 // 获取存储的 token
 function getAuthToken(): string | null {

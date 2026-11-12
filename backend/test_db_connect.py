@@ -1,13 +1,15 @@
+import os
+
 import psycopg2
 from psycopg2 import sql
 
 try:
     conn = psycopg2.connect(
-        host='localhost',
-        port=5432,
-        user='postgres',
-        password='change-me-please',
-        database='postgres'
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", ""),
+        database=os.getenv("DB_NAME", "postgres")
     )
     conn.set_session(autocommit=True)  # 设置自动提交
     cur = conn.cursor()

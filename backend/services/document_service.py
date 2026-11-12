@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+import asyncio
 import os
 import uuid
 from datetime import datetime
@@ -27,26 +28,38 @@ class DocumentService:
         return Path(filename).suffix.lower().lstrip(".")
 
     async def save_file(self, file: UploadFile) -> Dict[str, Any]:
-        """保存上传的文件"""
+        """保存上传的文件（分块读取并强制大小上限，避免整文件驻留内存）"""
         file_id = str(uuid.uuid4())
         extension = self._get_file_extension(file.filename)
         stored_filename = f"{file_id}.{extension}"
         file_path = self.upload_dir / stored_filename
+        limit_mb = settings.MAX_FILE_SIZE // (1024 * 1024)
 
-        content = await file.read()
-        async with aiofiles.open(file_path, "wb") as f:
-            await f.write(content)
+        size = 0
+        try:
+            async with aiofiles.open(file_path, "wb") as f:
+                while True:
+                    block = await file.read(1024 * 1024)
+                    if not block:
+                        break
+                    size += len(block)
+                    if size > settings.MAX_FILE_SIZE:
+                        raise ValueError(f"文件过大，最大支持 {limit_mb}MB")
+                    await f.write(block)
+        except Exception:
+            file_path.unlink(missing_ok=True)
+            raise
 
         return {
             "file_id": file_id,
             "filename": file.filename,
             "file_path": str(file_path),
             "file_type": extension,
-            "file_size": len(content)
+            "file_size": size
         }
 
-    async def extract_text(self, file_path: str, file_type: str) -> str:
-        """从不同格式文件中提取文本"""
+    def extract_text(self, file_path: str, file_type: str) -> str:
+        """从不同格式文件中提取文本（同步，调用方放线程池）"""
         if file_type == "pdf":
             return self._extract_pdf(file_path)
         elif file_type in ["docx", "doc"]:
@@ -81,26 +94,26 @@ class DocumentService:
             df = pd.read_excel(file_path)
         return df.to_string()
 
-    async def process_document(
+    async def create_document(
         self,
         user_id: str,
         file: UploadFile,
-        chunk_size: int = None,
-        overlap: int = None,
         chunk_strategy: str = None
     ) -> Document:
-        """处理上传的文档"""
-        if chunk_size is None:
-            chunk_size = settings.CHUNK_SIZE
-        if overlap is None:
-            overlap = settings.CHUNK_OVERLAP
+        """校验并保存文件，创建待处理文档记录"""
         if chunk_strategy is None:
             chunk_strategy = getattr(settings, 'CHUNK_STRATEGY', 'recursive')
 
-        # 保存文件
+        # 上传前校验类型与大小
+        extension = self._get_file_extension(file.filename)
+        if extension not in {"pdf", "docx", "doc", "txt", "md", "xlsx", "xls", "csv"}:
+            raise ValueError(f"不支持的文件类型: {extension}")
+        if file.size is not None and file.size > settings.MAX_FILE_SIZE:
+            limit_mb = settings.MAX_FILE_SIZE // (1024 * 1024)
+            raise ValueError(f"文件过大，最大支持 {limit_mb}MB")
+
         file_info = await self.save_file(file)
 
-        # 创建文档记录
         document = Document(
             user_id=user_id,
             filename=file_info["filename"],
@@ -112,15 +125,41 @@ class DocumentService:
         )
         self.db.add(document)
         self.db.commit()
+        self.db.refresh(document)
+        return document
+
+    async def process_document_chunks(
+        self,
+        document_id: str,
+        chunk_size: int = None,
+        overlap: int = None,
+        chunk_strategy: str = None
+    ) -> Document:
+        """后台处理文档：提取、切块、生成向量"""
+        if chunk_size is None:
+            chunk_size = settings.CHUNK_SIZE
+        if overlap is None:
+            overlap = settings.CHUNK_OVERLAP
+        if chunk_strategy is None:
+            chunk_strategy = getattr(settings, 'CHUNK_STRATEGY', 'recursive')
+
+        document = self.db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            return None
 
         try:
-            # 提取文本
-            text = await self.extract_text(file_info["file_path"], file_info["file_type"])
+            # 提取文本（同步 CPU/IO 操作放到线程池）
+            text = await asyncio.to_thread(
+                self.extract_text, document.file_path, document.file_type
+            )
 
-            # 分块（使用高级策略）
-            chunks = self._chunk_text(text, chunk_size, overlap, chunk_strategy)
+            # 分块（CPU 操作放到线程池）
+            chunks = await asyncio.to_thread(
+                self._chunk_text, text, chunk_size, overlap, chunk_strategy
+            )
 
-            # 生成嵌入并保存
+            # 先落库分块，再按批生成向量（减少 embedding 请求次数）
+            chunk_records = []
             for i, chunk_text in enumerate(chunks):
                 chunk = Chunk(
                     document_id=document.id,
@@ -134,15 +173,19 @@ class DocumentService:
                     }
                 )
                 self.db.add(chunk)
-                self.db.flush()
+                chunk_records.append(chunk)
+            self.db.flush()
 
-                # 生成向量
-                embedding = embedding_service.embed([chunk_text])[0]
-                vector = Vector(
-                    chunk_id=chunk.id,
-                    embedding=embedding
+            batch_size = 10
+            for start in range(0, len(chunk_records), batch_size):
+                batch = chunk_records[start:start + batch_size]
+                embeddings = await asyncio.to_thread(
+                    embedding_service.embed, [c.content for c in batch]
                 )
-                self.db.add(vector)
+                if len(embeddings) != len(batch):
+                    raise ValueError("embedding 返回数量与分块数量不一致")
+                for chunk, embedding in zip(batch, embeddings):
+                    self.db.add(Vector(chunk_id=chunk.id, embedding=embedding))
 
             document.status = "completed"
             document.extra_metadata = {
@@ -154,12 +197,56 @@ class DocumentService:
             self.db.commit()
 
         except Exception as e:
+            self.db.rollback()
             document.status = "failed"
             document.extra_metadata = {"error": str(e), "chunk_strategy": chunk_strategy}
             self.db.commit()
             raise
 
         return document
+
+    async def reindex_documents(
+        self,
+        user_id: str = None,
+        chunk_size: int = None,
+        overlap: int = None,
+        chunk_strategy: str = None
+    ) -> Dict[str, Any]:
+        """按最新切块配置重建文档索引：删除旧块（级联清理向量与引用）后重新切块并重算 embedding"""
+        query = self.db.query(Document)
+        if user_id:
+            query = query.filter(Document.user_id == user_id)
+        documents = query.filter(Document.status.in_(["completed", "failed"])).all()
+
+        result = {"total": len(documents), "success": 0, "failed": 0, "errors": []}
+        for document in documents:
+            try:
+                for chunk in list(document.chunks):
+                    self.db.delete(chunk)
+                self.db.flush()
+                document.status = "processing"
+                self.db.commit()
+                await self.process_document_chunks(document.id, chunk_size, overlap, chunk_strategy)
+                result["success"] += 1
+            except Exception as e:
+                self.db.rollback()
+                result["failed"] += 1
+                result["errors"].append(f"{document.filename}: {e}")
+        return result
+
+    async def process_document(
+        self,
+        user_id: str,
+        file: UploadFile,
+        chunk_size: int = None,
+        overlap: int = None,
+        chunk_strategy: str = None
+    ) -> Document:
+        """同步处理入口（示例/测试用）"""
+        document = await self.create_document(user_id, file, chunk_strategy)
+        return await self.process_document_chunks(
+            document.id, chunk_size, overlap, chunk_strategy
+        )
 
     def _chunk_text(
         self,
@@ -196,6 +283,10 @@ class DocumentService:
         text = self._preprocess_text(text)
         if not text.strip():
             return []
+
+        # 短文本直接作为单块，避免被 min_chunk_size 过滤掉
+        if len(text.strip()) <= 80:
+            return [text.strip()]
 
         # 使用高级切块器
         chunker = AdvancedChunker(

@@ -512,6 +512,7 @@ export const useChatStore = create<ChatState>()(
     const userMessageId = `user-${Date.now()}`
 
     let fullContent = ''
+    let streamError = ''
     let accumulatedCitations: any[] = []
     let accumulatedEvidence: any = null
 
@@ -613,6 +614,8 @@ export const useChatStore = create<ChatState>()(
               } else if (parsed.type === 'done') {
                 if (parsed.citations) accumulatedCitations = parsed.citations
                 if (parsed.evidence) accumulatedEvidence = parsed.evidence
+              } else if (parsed.type === 'error') {
+                streamError = parsed.error || '未知错误'
               }
             } catch (e) {
               console.error('解析错误:', e, 'jsonStr:', jsonStr.slice(0, 100))
@@ -629,8 +632,13 @@ export const useChatStore = create<ChatState>()(
       // 流式传输完成，用最终数据更新助手消息
       console.log('[sendStreamMessage] 流式传输完成，fullContent:', fullContent, 'citations:', accumulatedCitations, 'evidence:', accumulatedEvidence ? '有' : '无')
       
-      // 【保护】如果 LLM 返回空响应，使用默认消息
-      if (!fullContent || !fullContent.trim()) {
+      // 后端返回错误事件时优先展示真实错误，避免误报"未找到相关信息"
+      if (streamError) {
+        fullContent = fullContent.trim()
+          ? `${fullContent}\n\n（生成中断：${streamError}）`
+          : `回答失败：${streamError}`
+      } else if (!fullContent || !fullContent.trim()) {
+        // 【保护】如果 LLM 返回空响应，使用默认消息
         fullContent = "未找到相关信息"
         console.log('[sendStreamMessage] LLM 返回空响应，使用默认消息')
       }

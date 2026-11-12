@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, Integer, Float, ForeignKey, Boolean
+from sqlalchemy import Column, String, DateTime, Text, Integer, Float, ForeignKey, Boolean, Index
 from sqlalchemy.dialects.postgresql import UUID, JSON
 from sqlalchemy.orm import relationship
+from pgvector.sqlalchemy import Vector as PgVector
 from core.database import Base
 
 
@@ -10,7 +11,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    username = Column(String(100), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False)
     email = Column(String(255), unique=True, nullable=True, index=True)
     password_hash = Column(String(255), nullable=True)
     name = Column(String(100), nullable=True)
@@ -36,6 +37,10 @@ class Conversation(Base):
     user = relationship("User", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", order_by="Message.created_at")
 
+    __table_args__ = (
+        Index("idx_conversations_user_id", "user_id"),
+    )
+
 
 class Message(Base):
     __tablename__ = "messages"
@@ -50,6 +55,10 @@ class Message(Base):
 
     conversation = relationship("Conversation", back_populates="messages")
     citations = relationship("Citation", back_populates="message", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_messages_conversation_id", "conversation_id"),
+    )
 
     @property
     def extra_metadata(self):
@@ -85,6 +94,10 @@ class Document(Base):
     user = relationship("User", back_populates="documents")
     chunks = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        Index("idx_documents_user_id", "user_id"),
+    )
+
     @property
     def extra_metadata(self):
         return self.metadata_
@@ -108,6 +121,10 @@ class Chunk(Base):
     document = relationship("Document", back_populates="chunks")
     vector = relationship("Vector", back_populates="chunk", uselist=False, cascade="all, delete-orphan")
     citations = relationship("Citation", back_populates="chunk", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_chunks_document_id", "document_id"),
+    )
     
     @property
     def extra_metadata(self):
@@ -122,10 +139,19 @@ class Vector(Base):
     __tablename__ = "vectors"
 
     chunk_id = Column(UUID(as_uuid=True), ForeignKey("chunks.id"), primary_key=True)
-    embedding = Column(JSON, nullable=False)
+    embedding = Column(PgVector(1024), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     chunk = relationship("Chunk", back_populates="vector")
+
+    __table_args__ = (
+        Index(
+            "vectors_embedding_hnsw_idx",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
 
 
 class Citation(Base):
@@ -155,6 +181,11 @@ class Citation(Base):
     message = relationship("Message", back_populates="citations")
     chunk = relationship("Chunk", back_populates="citations")
 
+    __table_args__ = (
+        Index("idx_citations_message_id", "message_id"),
+        Index("idx_citations_chunk_id", "chunk_id"),
+    )
+
 
 class Memory(Base):
     __tablename__ = "memories"
@@ -171,3 +202,7 @@ class Memory(Base):
     extra_metadata = Column(JSON, nullable=True, default=dict)
 
     user = relationship("User", back_populates="memories")
+
+    __table_args__ = (
+        Index("idx_memories_user_id", "user_id"),
+    )

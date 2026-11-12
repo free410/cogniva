@@ -1,8 +1,8 @@
 from typing import List, Optional, Dict, Any, AsyncIterator
 from datetime import datetime, timedelta
 import uuid
-from sqlalchemy.orm import Session
-from models import Conversation, Message, User, Citation
+from sqlalchemy.orm import Session, joinedload
+from models import Conversation, Message, User, Citation, Chunk
 from services.llm_gateway import llm_gateway, LLMError
 from services.rag_service import RAGService
 from services.memory_service import MemoryService
@@ -31,8 +31,22 @@ class ChatService:
             Conversation.user_id == user_id
         ).order_by(Conversation.updated_at.desc()).all()
 
-    async def get_conversation(self, conversation_id: str, user_id: str) -> Optional[Conversation]:
-        return self.db.query(Conversation).filter(
+    async def get_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+        with_citations: bool = False
+    ) -> Optional[Conversation]:
+        query = self.db.query(Conversation)
+        if with_citations:
+            # 一次性预加载消息 -> 引用 -> 块 -> 文档，避免逐条查询的 N+1
+            query = query.options(
+                joinedload(Conversation.messages)
+                .joinedload(Message.citations)
+                .joinedload(Citation.chunk)
+                .joinedload(Chunk.document)
+            )
+        return query.filter(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id
         ).first()
@@ -251,6 +265,15 @@ class ChatService:
             else:
                 response = f"抱歉，AI 服务暂时不可用: {error_msg}"
             print(f"LLM error: {e}")
+
+        # 答案级校验：用答案对引用块的支撑度校准置信度
+        if use_rag and retrieved_chunks and evidence_report:
+            try:
+                evidence_report = rag_svc.apply_groundedness(
+                    evidence_report, response, retrieved_chunks
+                )
+            except Exception as e:
+                print(f"groundedness error: {e}")
 
         # 保存助手回复（包含证据报告）
         assistant_message = Message(
@@ -545,6 +568,19 @@ class ChatService:
             if not full_response or not full_response.strip():
                 full_response = "未找到相关信息"
                 print(f"[STREAM] LLM 返回空响应，使用默认消息")
+
+            # 答案级校验：用答案对引用块的支撑度校准最终置信度
+            if use_rag and retrieved_chunks and evidence_report:
+                try:
+                    evidence_report = rag_svc.apply_groundedness(
+                        evidence_report, full_response, retrieved_chunks
+                    )
+                    print(
+                        f"[STREAM] groundedness={evidence_report.get('groundedness', {}).get('score')} "
+                        f"confidence={evidence_report.get('confidence')}"
+                    )
+                except Exception as e:
+                    print(f"[STREAM] groundedness 校验失败: {e}")
             
             assistant_message.content = full_response
             assistant_message.extra_metadata = {

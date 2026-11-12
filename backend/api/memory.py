@@ -5,21 +5,9 @@ from pydantic import BaseModel
 from core import get_db
 from services import MemoryService
 from models import User
-from uuid import UUID
+from api.auth import require_auth
 
 router = APIRouter(prefix="/api", tags=["memory"])
-
-DEFAULT_USER_EMAIL = "default@local"
-
-
-def get_default_user_id(db: Session) -> UUID:
-    user = db.query(User).filter(User.email == DEFAULT_USER_EMAIL).first()
-    if not user:
-        user = User(email=DEFAULT_USER_EMAIL, username="default_user", name="Default User", settings={})
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    return user.id
 
 
 class MemoryCreate(BaseModel):
@@ -55,9 +43,10 @@ class ReviewResponse(BaseModel):
 @router.post("/memories")
 async def create_memory(
     data: MemoryCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
     memory = await service.create_memory(
         user_id=user_id,
@@ -82,9 +71,10 @@ async def create_memory(
 async def list_memories(
     category: Optional[str] = None,
     include_due: bool = False,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
     memories = await service.get_memories(user_id, category, include_due)
 
@@ -102,9 +92,10 @@ async def list_memories(
 
 @router.get("/memories/due")
 async def get_due_memories(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
     memories = await service.get_due_memories(user_id)
 
@@ -123,9 +114,10 @@ async def get_due_memories(
 @router.get("/memories/upcoming")
 async def get_upcoming_reviews(
     days: int = 7,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
     return await service.get_upcoming_reviews(user_id, days)
 
@@ -134,9 +126,10 @@ async def get_upcoming_reviews(
 async def review_memory(
     memory_id: str,
     quality: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
 
     try:
@@ -155,9 +148,10 @@ async def review_memory(
 async def update_memory(
     memory_id: str,
     data: MemoryUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
 
     try:
@@ -181,9 +175,10 @@ async def update_memory(
 @router.delete("/memories/{memory_id}")
 async def delete_memory(
     memory_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
     success = await service.delete_memory(memory_id, user_id)
 
@@ -197,10 +192,11 @@ async def delete_memory(
 async def extract_memories_from_conversation(
     conversation_id: str,
     extract_count: int = 3,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
     """从对话中提取记忆"""
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
 
     try:
@@ -226,8 +222,9 @@ async def extract_memories_from_conversation(
 
 @router.get("/memories/statistics")
 async def get_memory_statistics(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user: User = Depends(require_auth)
 ):
-    user_id = get_default_user_id(db)
+    user_id = user.id
     service = MemoryService(db)
     return await service.get_statistics(user_id)

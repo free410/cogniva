@@ -10,7 +10,8 @@ import re
 
 from core import get_db
 from core.auth import (
-    get_password_hash, verify_password, create_access_token, decode_access_token
+    get_password_hash, verify_password, create_access_token, decode_access_token,
+    is_legacy_password_hash
 )
 from models import User
 
@@ -151,7 +152,12 @@ async def login(data: UserLogin, db: Session = Depends(get_db)):
     # 验证密码
     if not verify_password(data.password, user.password_hash or ""):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    
+
+    # 旧哈希在登录成功后自动升级为 bcrypt
+    if is_legacy_password_hash(user.password_hash or ""):
+        user.password_hash = get_password_hash(data.password)
+        db.commit()
+
     # 生成 token
     token = create_access_token(user.id, user.username)
     
@@ -179,7 +185,11 @@ async def login_form(
     
     if not verify_password(form_data.password, user.password_hash or ""):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    
+
+    if is_legacy_password_hash(user.password_hash or ""):
+        user.password_hash = get_password_hash(form_data.password)
+        db.commit()
+
     token = create_access_token(user.id, user.username)
     
     return TokenResponse(

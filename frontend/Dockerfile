@@ -3,6 +3,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# 前端调用的后端地址在构建时写入（NEXT_PUBLIC_* 变量只在构建期生效）
+# 留空 = 同源访问，由 nginx 把 /api 反向代理到后端
+ARG NEXT_PUBLIC_API_URL=
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
 # 复制 package 文件
 COPY package*.json ./
 

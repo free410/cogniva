@@ -1,9 +1,12 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from core.database import SessionLocal
+from core import get_db
 from core.config import settings
+from models import User
+from api.auth import require_auth
 import httpx
 import asyncio
 
@@ -41,21 +44,17 @@ class DatabaseStatus(BaseModel):
     status: str
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @router.get("/", response_model=Dict[str, Any])
-async def get_settings():
-    """获取当前配置"""
+async def get_settings(
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """获取当前配置：用户设置优先，缺省回落到环境变量"""
+    saved = user.settings if isinstance(user.settings, dict) else {}
     return {
-        "default_provider": getattr(settings, 'DEFAULT_PROVIDER', 'deepseek'),
-        "ollama_url": settings.OLLAMA_BASE_URL,
-        "ollama_model": settings.OLLAMA_MODEL,
+        "default_provider": saved.get("default_provider") or getattr(settings, 'DEFAULT_PROVIDER', 'deepseek'),
+        "ollama_url": saved.get("ollama_url") or settings.OLLAMA_BASE_URL,
+        "ollama_model": saved.get("ollama_model") or settings.OLLAMA_MODEL,
         "openai_key": "***" if settings.OPENAI_API_KEY else "",
         "anthropic_key": "***" if settings.ANTHROPIC_API_KEY else "",
         "dashscope_key": "***" if settings.DASHSCOPE_API_KEY else "",
@@ -63,22 +62,35 @@ async def get_settings():
 
 
 @router.post("/", response_model=Dict[str, Any])
-async def update_settings(data: SettingsUpdate):
-    """更新配置"""
+async def update_settings(
+    data: SettingsUpdate,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """更新配置并持久化到当前用户的 settings"""
+    allowed_providers = {"deepseek", "openai", "anthropic", "ollama", "dashscope"}
+    if data.default_provider is not None and data.default_provider not in allowed_providers:
+        raise HTTPException(status_code=400, detail="不支持的模型服务商")
+
+    saved = dict(user.settings) if isinstance(user.settings, dict) else {}
     updated = {}
-    
-    if data.ollama_url is not None:
-        settings.OLLAMA_BASE_URL = data.ollama_url
-        updated["ollama_url"] = data.ollama_url
-    
-    if data.ollama_model is not None:
-        settings.OLLAMA_MODEL = data.ollama_model
-        updated["ollama_model"] = data.ollama_model
-    
+
     if data.default_provider is not None:
-        # 保存到 .env 或数据库
+        saved["default_provider"] = data.default_provider
         updated["default_provider"] = data.default_provider
-    
+
+    if data.ollama_url is not None:
+        saved["ollama_url"] = data.ollama_url
+        updated["ollama_url"] = data.ollama_url
+
+    if data.ollama_model is not None:
+        saved["ollama_model"] = data.ollama_model
+        updated["ollama_model"] = data.ollama_model
+
+    # API Key 属于服务端环境配置，不接受通过该接口写入，避免明文落库
+    user.settings = saved
+    db.commit()
+
     return {
         "success": True,
         "updated": updated,
@@ -87,7 +99,7 @@ async def update_settings(data: SettingsUpdate):
 
 
 @router.get("/providers", response_model=List[ProviderStatus])
-async def get_provider_status():
+async def get_provider_status(user: User = Depends(require_auth)):
     """检查各 LLM 提供商状态"""
     providers = []
     
@@ -167,7 +179,7 @@ async def get_provider_status():
 
 
 @router.get("/database", response_model=DatabaseStatus)
-async def get_database_status():
+async def get_database_status(user: User = Depends(require_auth)):
     """检查数据库连接状态"""
     from sqlalchemy import text
     
@@ -187,7 +199,7 @@ async def get_database_status():
         
         # 获取向量信息
         vectors_count = 0
-        vector_dimension = 1536  # 默认使用 DashScope text-embedding-v3 的维度
+        vector_dimension = 1024  # DashScope text-embedding-v3 默认维度，与 vectors.embedding 列一致
         
         # 检查 vectors 表
         try:

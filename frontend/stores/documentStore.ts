@@ -12,6 +12,7 @@ interface DocumentState {
   fetchDocuments: () => Promise<void>
   uploadDocument: (file: File) => Promise<Document>
   deleteDocument: (id: string) => Promise<void>
+  pollDocumentStatus: (documentId: string) => Promise<void>
 }
 
 export const useDocumentStore = create<DocumentState>((set, get) => ({
@@ -59,13 +60,15 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
           file_type: file.name.split('.').pop() || '',
           file_size: file.size,
           file_path: '',
-          status: 'processing',
+          status: data.status as Document['status'],
           created_at: new Date().toISOString()
         }
         set(state => ({
           documents: [newDoc, ...state.documents],
           uploadProgress: 100
         }))
+        // 后台上传处理是异步的，轮询直到完成/失败
+        void get().pollDocumentStatus(data.id)
         return newDoc
       } else {
         throw new Error('Upload failed')
@@ -88,6 +91,32 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     } catch (error) {
       console.error('Failed to delete document:', error)
       throw error
+    }
+  },
+
+  pollDocumentStatus: async (documentId: string) => {
+    // 轮询后端状态：每 2 秒一次，最多约 2 分钟
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 2000))
+
+      // 文档已被删除则停止轮询
+      if (!get().documents.some(d => d.id === documentId)) return
+
+      try {
+        const { data } = await api.get<Document>(`/api/documents/${documentId}`)
+        if (!data) return
+
+        set(state => ({
+          documents: state.documents.map(d =>
+            d.id === documentId ? { ...d, ...data } : d
+          )
+        }))
+
+        if (data.status === 'completed' || data.status === 'failed') return
+      } catch (error) {
+        console.error('Failed to poll document status:', error)
+        return
+      }
     }
   }
 }))

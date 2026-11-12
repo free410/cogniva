@@ -5,6 +5,9 @@ from typing import Optional
 class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/knowledge_assistant"
+
+    # Redis
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
     
     # LLM API Keys
     OPENAI_API_KEY: Optional[str] = None
@@ -23,14 +26,18 @@ class Settings(BaseSettings):
     # App settings
     APP_SECRET: str = "default-secret-key-change-in-production"
     DEBUG: bool = True
+
+    # CORS：逗号分隔的允许来源列表，"*" 表示全部放行
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
+    CORS_ORIGIN_REGEX: Optional[str] = r"http://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+):3000"
     
     # Upload settings
     UPLOAD_DIR: str = "uploads"
     MAX_FILE_SIZE: int = 50 * 1024 * 1024  # 50MB
     
     # RAG settings - 优化切块策略
-    CHUNK_SIZE: int = 1200        # 块大小（字符数）- 增大以保持内容完整
-    CHUNK_OVERLAP: int = 200     # 块间重叠（字符数）- 增大以保持上下文连贯
+    CHUNK_SIZE: int = 500         # 块大小（字符数）- 与精排截断长度匹配，减少语义稀释
+    CHUNK_OVERLAP: int = 100     # 块间重叠（字符数）- 保持上下文连贯
     CHUNK_STRATEGY: str = "smart_hybrid"  # 切块策略：smart_hybrid(推荐), intent, entity, deep_semantic, recursive, semantic, markdown, sliding_window, hybrid
     TOP_K: int = 15             # 检索返回数量 - 减少到15确保高相关性
     

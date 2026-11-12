@@ -64,59 +64,71 @@
 
 ## 快速开始
 
-### 1. 环境要求
+### 方式一：Docker 一键启动（推荐）
 
-- Node.js >= 18
-- Python >= 3.10
-- PostgreSQL >= 14 (需启用 pgvector 扩展)
-- Docker (用于数据库)
-
-### 2. 启动数据库
+环境要求：Docker Desktop（或 Docker Engine + Compose v2）
 
 ```bash
-docker-compose up -d
+# 1. 准备配置文件
+copy .env.example .env                    # Windows: copy / Linux: cp
+copy backend\.env.example backend\.env    # 填入 LLM 与向量化 API Key
+
+# 2. 一键启动（首次会自动构建镜像）
+docker compose up -d
+
+# 3. 访问 http://localhost
 ```
 
-### 3. 配置后端
+启动后的服务：
+
+| 服务 | 说明 | 端口 |
+|------|------|------|
+| nginx | 统一入口，`/` 转前端、`/api` 转后端 | 80 |
+| backend | FastAPI 后端 | 127.0.0.1:8000（仅本机调试） |
+| frontend | Next.js 前端 | 内部 3000 |
+| postgres | PostgreSQL + pgvector | 127.0.0.1:5433 |
+| redis | 检索结果缓存 | 6379 |
+
+常用命令：
 
 ```bash
+docker compose ps                 # 查看状态
+docker compose logs -f backend    # 跟踪后端日志
+docker compose up -d --build      # 改代码后重新构建并启动
+docker compose down               # 停止（数据保留在卷中）
+```
+
+> 精排模型位于 `models/bge-reranker-v2-m3`（约 2.1GB），以只读方式挂载给容器，未打进镜像。换机器部署时需一并拷贝该目录，否则容器会尝试从 HuggingFace 在线下载。
+
+### 方式二：本地开发
+
+环境要求：Node.js >= 18、Python >= 3.10、PostgreSQL >= 14（启用 pgvector）
+
+```bash
+# 1. 只启动数据库和缓存
+docker compose up -d postgres redis
+
+# 2. 启动后端
 cd backend
-
-# 创建虚拟环境
 python -m venv venv
-
-# Windows
-venv\Scripts\activate
-# Linux/Mac
-source venv/bin/activate
-
-# 安装依赖
+venv\Scripts\activate          # Linux/Mac: source venv/bin/activate
 pip install -r requirements.txt
-
-# 复制并编辑环境变量
-cp ../.env.example .env
-```
-
-### 4. 启动后端
-
-```bash
+copy .env.example .env         # 填入 API Key
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
 
-### 5. 安装并启动前端
-
-```bash
+# 3. 启动前端
 cd frontend
-
 npm install
 npm run dev
 ```
 
-### 6. 访问应用
+### 访问应用
 
-- 前端：http://localhost:3000
-- 后端 API：http://localhost:8000
-- API 文档：http://localhost:8000/docs
+- 前端（Docker）：http://localhost
+- 前端（本地开发）：http://localhost:3000
+- 后端 API：http://localhost/api
+- API 文档：http://localhost/docs
+
 
 ## 部署架构
 

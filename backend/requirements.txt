@@ -8,9 +8,11 @@ sqlalchemy==2.0.25
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
 pgvector==0.2.1
+alembic==1.20.1
 
 # JWT Authentication
 python-jose[cryptography]==3.3.0
+bcrypt==5.0.0
 
 # Pydantic & Settings
 pydantic==2.6.1
@@ -32,11 +34,14 @@ python-docx==1.1.0
 pandas>=2.0.0
 
 # Vector & ML
-# chromadb 已禁用 - 依赖 sentence-transformers (需要 1.5GB+ PyTorch)
-# 向量搜索使用 pgvector (PostgreSQL 扩展)
+# chromadb 已禁用 - 向量搜索使用 pgvector (PostgreSQL 扩展)
+# 精排模型：模型文件通过 ./models 挂载，容器内只安装 CPU 版运行时
+torch==2.11.0+cpu
+sentence-transformers==2.4.0
 
 # Caching
 redis==5.0.1
 
 # Utilities
 python-dateutil==2.8.2
+jieba==0.42.1

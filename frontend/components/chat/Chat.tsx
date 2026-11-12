@@ -39,7 +39,10 @@ export function Chat() {
   useEffect(() => {
     const loadDefaultProvider = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/settings/`)
+        const token = localStorage.getItem('token')
+        const response = await fetch(`${API_BASE_URL}/api/settings/`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        })
         if (response.ok) {
           const data = await response.json()
           if (data.default_provider) {

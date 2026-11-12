@@ -87,12 +87,15 @@ def test_chunking():
     )
 
     strategies = [
+        ("smart_hybrid", "智能混合切块"),
+        ("intent", "意图感知切块"),
+        ("entity", "实体感知切块"),
         ("recursive", "递归字符切块"),
-        ("semantic", "语义切块"),
-        ("markdown", "Markdown结构切块"),
-        ("sliding_window", "滑动窗口切块"),
-        ("hybrid", "混合策略")
     ]
+
+    if os.getenv("TEST_DEEP_SEMANTIC") == "1":
+        # 深度语义切块会调用 embedding 接口，默认跳过
+        strategies.append(("deep_semantic", "深度语义切块"))
 
     for strategy, description in strategies:
         print(f"\n{'=' * 60}")
@@ -122,7 +125,7 @@ def test_chunking():
     print("便捷函数测试")
     print("=" * 60)
 
-    chunks = chunk_text(test_text, chunk_size=200, overlap=30, strategy="recursive")
+    chunks = chunk_text(test_text, chunk_size=200, chunk_overlap=30, strategy="recursive")
     print(f"使用 chunk_text() 函数生成 {len(chunks)} 个块")
 
 
@@ -137,7 +140,7 @@ def compare_strategies():
     chunker = AdvancedChunker(chunk_size=150, chunk_overlap=20)
 
     results = {}
-    for strategy in ["recursive", "semantic", "sliding_window"]:
+    for strategy in ["smart_hybrid", "intent", "recursive"]:
         try:
             chunks = chunker.chunk(short_text, strategy=strategy)
             results[strategy] = {

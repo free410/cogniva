@@ -10,7 +10,7 @@ engine = create_engine(
     pool_size=20,
     max_overflow=10,
     pool_pre_ping=True,
-    echo=settings.DEBUG,
+    echo=False,  # 不逐条打印 SQL，避免日志与性能开销
     connect_args={
         "client_encoding": "UTF8"
     }

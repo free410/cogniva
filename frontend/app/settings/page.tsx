@@ -62,6 +62,12 @@ const SETTINGS_SECTIONS = [
   { id: 'api', label: '安全密钥', icon: Shield, desc: 'API Keys 管理' },
 ]
 
+// 设置接口需要登录，统一附带 token
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null
+  return { ...(extra || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+}
+
 interface ProviderStatus {
   name: string
   display_name: string
@@ -328,7 +334,7 @@ export default function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/settings/`)
+      const response = await fetch(`${API_BASE_URL}/api/settings/`, { headers: authHeaders() })
       if (response.ok) {
         const data = await response.json()
         setSettings(prev => ({
@@ -347,7 +353,7 @@ export default function SettingsPage() {
 
   const loadProviderStatus = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/settings/providers`)
+      const response = await fetch(`${API_BASE_URL}/api/settings/providers`, { headers: authHeaders() })
       if (response.ok) {
         const data = await response.json()
         setProviders(data)
@@ -359,7 +365,7 @@ export default function SettingsPage() {
 
   const loadDatabaseStatus = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/settings/database`)
+      const response = await fetch(`${API_BASE_URL}/api/settings/database`, { headers: authHeaders() })
       if (response.ok) {
         const data = await response.json()
         setDbStatus(data)
@@ -381,7 +387,7 @@ export default function SettingsPage() {
     try {
       const response = await fetch(`${API_BASE_URL}/api/settings/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           default_provider: settings.default_provider,
           ollama_url: settings.ollama_url,

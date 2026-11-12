@@ -8,8 +8,12 @@ venv/
 env/
 .venv/
 
-# Environment variables
+# Environment variables（模板 .env.example 需要提交，真实 .env 一律忽略）
 .env
+.env.*
+!.env.example
+!.env.docker.example
+!*.env.example
 
 # IDE
 .vscode/
@@ -22,6 +26,9 @@ logs/
 # Database
 *.db
 *.sqlite3
+# 数据库备份/导出
+*.sql
+*.dump
 
 # Node modules
 node_modules/
@@ -30,6 +37,10 @@ node_modules/
 # Build outputs
 dist/
 build/
+*.tsbuildinfo
 
 # Uploads
 uploads/
+
+# 本地大模型文件（约 2GB，通过 docker 挂载使用，不进仓库）
+models/
